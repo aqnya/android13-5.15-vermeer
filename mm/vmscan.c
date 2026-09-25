@@ -3030,8 +3030,11 @@ static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
+	if (!sc->may_swap)
+		return 0;
+
 	if (!can_demote(pgdat->node_id, sc) &&
-		mem_cgroup_get_nr_swap_pages(memcg) <= 0)
+	    mem_cgroup_get_nr_swap_pages(memcg) < MIN_LRU_BATCH)
 		return 0;
 
 	swappiness = mem_cgroup_swappiness(memcg);
@@ -4187,11 +4190,6 @@ restart:
 
 		VM_WARN_ON_ONCE(!full_scan && (type == LRU_GEN_FILE || can_swap));
 
-		while (!inc_min_seq(lruvec, type, can_swap)) {
-			spin_unlock_irq(&lruvec->lru_lock);
-			cond_resched();
-			spin_lock_irq(&lruvec->lru_lock);
-		}
 		if (inc_min_seq(lruvec, type, can_swap))
 			continue;
 
@@ -4469,6 +4467,10 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 	if (spin_is_contended(pvmw->ptl))
 		return;
 
+	/* exclude special VMAs containing anon pages from COW */
+	if (pvmw->vma->vm_flags & VM_SPECIAL)
+		return;
+
 	/* avoid taking the LRU lock under the PTL when possible */
 	walk = current->reclaim_state ? current->reclaim_state->mm_walk : NULL;
 
@@ -4611,7 +4613,7 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 	}
 
 	/* protected */
-	if (tier > tier_idx) {
+	if (tier > tier_idx || refs == BIT(LRU_REFS_WIDTH)) {
 		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 
 		gen = page_inc_gen(lruvec, page, false);
