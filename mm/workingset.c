@@ -245,41 +245,52 @@ static void *lru_gen_eviction(struct page *page)
 	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, refs);
 }
 
-static void lru_gen_refault(struct page *page, void *shadow)
+/*
+ * Tests if the shadow entry is for a page that was recently evicted.
+ * Fills in @lruvec, @token, @workingset with the values unpacked from shadow.
+ */
+static bool lru_gen_test_recent(void *shadow, bool file, struct lruvec **lruvec,
+				unsigned long *token, bool *workingset)
 {
-	int hist, tier, refs;
 	int memcg_id;
-	bool workingset;
-	unsigned long token;
 	unsigned long min_seq;
-	struct lruvec *lruvec;
-	struct lru_gen_struct *lrugen;
 	struct mem_cgroup *memcg;
 	struct pglist_data *pgdat;
+
+	unpack_shadow(shadow, &memcg_id, &pgdat, token, workingset);
+
+	memcg = mem_cgroup_from_id(memcg_id);
+	*lruvec = mem_cgroup_lruvec(memcg, pgdat);
+
+	min_seq = READ_ONCE((*lruvec)->lrugen.min_seq[file]);
+	return (*token >> LRU_REFS_WIDTH) == (min_seq & (EVICTION_MASK >> LRU_REFS_WIDTH));
+}
+
+static void lru_gen_refault(struct page *page, void *shadow)
+{
+	bool recent;
+	int hist, tier, refs;
+	bool workingset;
+	unsigned long token;
+	struct lruvec *lruvec;
+	struct lru_gen_struct *lrugen;
 	int type = page_is_file_lru(page);
 	int delta = thp_nr_pages(page);
 
-	unpack_shadow(shadow, &memcg_id, &pgdat, &token, &workingset);
-
-	if (pgdat != page_pgdat(page))
-		return;
-
 	rcu_read_lock();
 
-	memcg = page_memcg_rcu(page);
-	if (memcg_id != mem_cgroup_id(memcg))
+	recent = lru_gen_test_recent(shadow, type, &lruvec, &token, &workingset);
+	if (lruvec != mem_cgroup_lruvec(page_memcg_rcu(page), page_pgdat(page)))
 		goto unlock;
-
-	lruvec = mem_cgroup_lruvec(memcg, pgdat);
-	lrugen = &lruvec->lrugen;
 
 	mod_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + type, delta);
 
-	min_seq = READ_ONCE(lrugen->min_seq[type]);
-	if ((token >> LRU_REFS_WIDTH) != (min_seq & (EVICTION_MASK >> LRU_REFS_WIDTH)))
+	if (!recent)
 		goto unlock;
 
-	hist = lru_hist_from_seq(min_seq);
+	lrugen = &lruvec->lrugen;
+
+	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 	/* see the comment in page_lru_refs() */
 	refs = (token & (BIT(LRU_REFS_WIDTH) - 1)) + workingset;
 	tier = lru_tier_from_refs(refs);
@@ -292,10 +303,10 @@ static void lru_gen_refault(struct page *page, void *shadow)
 	 * 1. For pages accessed through page tables, hotter pages pushed out
 	 *    hot pages which refaulted immediately.
 	 * 2. For pages accessed multiple times through file descriptors,
-	 *    numbers of accesses might have been out of the range.
+	 *    they would have been protected by sort_page().
 	 */
-	if (lru_gen_in_fault() || refs == BIT(LRU_REFS_WIDTH)) {
-		SetPageWorkingset(page);
+	if (lru_gen_in_fault() || refs >= BIT(LRU_REFS_WIDTH) - 1) {
+		set_mask_bits(&page->flags, 0, LRU_REFS_MASK | BIT(PG_workingset));
 		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 	}
 unlock:
