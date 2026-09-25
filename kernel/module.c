@@ -3610,6 +3610,29 @@ static bool blacklisted(const char *module_name)
 }
 core_param(module_blacklist, module_blacklist, charp, 0400);
 
+/*
+ * Custom module blacklist.  Modules listed here (name without the .ko
+ * suffix) are never loaded: the request is silently treated as successful.
+ * This is mainly used to stop init from being killed when it tries to
+ * insmod a module that is already built into the kernel or otherwise
+ * must not be (re)loaded.  Add entries as needed.
+ */
+static const char * const custom_module_blacklist[] = {
+	"qcom_cpufreq_hw",
+	NULL,
+};
+
+static bool custom_blacklisted(const char *module_name)
+{
+	int i;
+
+	for (i = 0; custom_module_blacklist[i]; i++) {
+		if (!strcmp(module_name, custom_module_blacklist[i]))
+			return true;
+	}
+	return false;
+}
+
 static struct module *layout_and_allocate(struct load_info *info, int flags)
 {
 	struct module *mod;
@@ -4079,6 +4102,32 @@ static int load_module(struct load_info *info, const char __user *uargs,
 		goto free_copy;
 	}
 
+	/*
+	 * Custom blacklist: skip the module without failing.  init treats a
+	 * module load failure as fatal in some cases, so a blacklisted module
+	 * must not return an error.
+	 */
+	if (custom_blacklisted(info->name)) {
+		pr_info("Module %s is in custom blacklist, skipping load\n",
+			info->name);
+		err = 0;
+		goto free_copy;
+	}
+
+	/*
+	 * Detect a duplicate module (already loaded or built in) and skip it
+	 * instead of failing with -EEXIST.  This avoids init being killed when
+	 * it tries to load a module that is already present.
+	 */
+	mutex_lock(&module_mutex);
+	if (find_module(info->name)) {
+		mutex_unlock(&module_mutex);
+		pr_info("Module %s already loaded, skipping\n", info->name);
+		err = 0;
+		goto free_copy;
+	}
+	mutex_unlock(&module_mutex);
+
 	err = rewrite_section_headers(info, flags);
 	if (err)
 		goto free_copy;
@@ -4100,8 +4149,19 @@ static int load_module(struct load_info *info, const char __user *uargs,
 
 	/* Reserve our place in the list. */
 	err = add_unformed_module(mod);
-	if (err)
+	if (err) {
+		/*
+		 * The module may have appeared while we were preparing it
+		 * (e.g. a concurrent or built-in duplicate).  Do not fail the
+		 * load, otherwise init may be killed.
+		 */
+		if (err == -EEXIST || err == -EBUSY) {
+			pr_info("Module %s already loaded, skipping\n",
+				mod->name);
+			err = 0;
+		}
 		goto free_module;
+	}
 
 #ifdef CONFIG_MODULE_SIG
 	mod->sig_ok = info->sig_ok;
