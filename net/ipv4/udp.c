@@ -93,7 +93,6 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/slab.h>
-#include <linux/cache.h>
 #include <net/tcp_states.h>
 #include <linux/skbuff.h>
 #include <linux/proc_fs.h>
@@ -1523,17 +1522,17 @@ static void udp_skb_dtor_locked(struct sock *sk, struct sk_buff *skb)
  * to relieve pressure on the receive_queue spinlock shared by consumer.
  * Under flood, this means that only one producer can be in line
  * trying to acquire the receive_queue spinlock.
- * The lock is per socket as upstream did in 3cd04c8f4afe ("udp: make
- * busylock per socket"), so it can be cache-line aligned and avoids the
- * NUMA bouncing of the old global hashed array.  The pointer is kept in
- * a KABI reserve of struct sock, leaving the ABI unchanged.
+ * These busylock can be allocated on a per cpu manner, instead of a
+ * per socket one (that would consume a cache line per socket)
  */
-static struct kmem_cache *udp_busylock_cache __ro_after_init;
+static int udp_busylocks_log __read_mostly;
+static spinlock_t *udp_busylocks __read_mostly;
 
-static spinlock_t *busylock_acquire(struct sock *sk)
+static spinlock_t *busylock_acquire(void *ptr)
 {
-	spinlock_t *busy = sk->sk_udp_busylock;
+	spinlock_t *busy;
 
+	busy = udp_busylocks + hash_ptr(ptr, udp_busylocks_log);
 	spin_lock(busy);
 	return busy;
 }
@@ -1567,27 +1566,17 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 	if (rmem > (sk->sk_rcvbuf >> 1)) {
 		skb_condense(skb);
 
-		size = skb->truesize;
-
-		/* Avoid piling too many producers on the busylock:
-		 * update sk_rmem_alloc (and bail out early on overflow)
-		 * before acquiring it. We drop only if the receive buf
-		 * is full and the receive queue contains some other skb.
-		 */
-		rmem = atomic_add_return(size, &sk->sk_rmem_alloc);
-		if (rmem > (size + (unsigned int)sk->sk_rcvbuf))
-			goto uncharge_drop;
-
 		busy = busylock_acquire(sk);
-	} else {
-		size = skb->truesize;
-
-		/* No need for the expensive atomic_add_return() when we
-		 * are not close to sk_rcvbuf.
-		 */
-		atomic_add(size, &sk->sk_rmem_alloc);
 	}
+	size = skb->truesize;
 	udp_set_dev_scratch(skb);
+
+	/* we drop only if the receive buf is full and the receive
+	 * queue contains some other skb
+	 */
+	rmem = atomic_add_return(size, &sk->sk_rmem_alloc);
+	if (rmem > (size + (unsigned int)sk->sk_rcvbuf))
+		goto uncharge_drop;
 
 	spin_lock(&list->lock);
 	if (size >= sk->sk_forward_alloc) {
@@ -1641,11 +1630,6 @@ void udp_destruct_common(struct sock *sk)
 		kfree_skb(skb);
 	}
 	udp_rmem_release(sk, total, 0, true);
-
-	if (sk->sk_udp_busylock) {
-		kmem_cache_free(udp_busylock_cache, sk->sk_udp_busylock);
-		sk->sk_udp_busylock = NULL;
-	}
 }
 EXPORT_SYMBOL_GPL(udp_destruct_common);
 
@@ -1655,29 +1639,11 @@ static void udp_destruct_sock(struct sock *sk)
 	inet_sock_destruct(sk);
 }
 
-/* Allocate and initialise the per-socket busylock.  Called from the
- * protocol ->init() (process context) for both IPv4 and IPv6/UDP-Lite.
- */
-int udp_busylock_alloc(struct sock *sk)
-{
-	spinlock_t *busylock;
-
-	sk->sk_udp_busylock = NULL;
-	busylock = kmem_cache_alloc(udp_busylock_cache, GFP_KERNEL);
-	if (!busylock)
-		return -ENOMEM;
-
-	spin_lock_init(busylock);
-	sk->sk_udp_busylock = busylock;
-	return 0;
-}
-EXPORT_SYMBOL_GPL(udp_busylock_alloc);
-
 int udp_init_sock(struct sock *sk)
 {
 	skb_queue_head_init(&udp_sk(sk)->reader_queue);
 	sk->sk_destruct = udp_destruct_sock;
-	return udp_busylock_alloc(sk);
+	return 0;
 }
 
 void skb_consume_udp(struct sock *sk, struct sk_buff *skb, int len)
@@ -3392,6 +3358,7 @@ static void __init bpf_iter_register(void)
 void __init udp_init(void)
 {
 	unsigned long limit;
+	unsigned int i;
 
 	udp_table_init(&udp_table, "UDP");
 	limit = nr_free_buffer_pages() / 8;
@@ -3400,18 +3367,16 @@ void __init udp_init(void)
 	sysctl_udp_mem[1] = limit;
 	sysctl_udp_mem[2] = sysctl_udp_mem[0] * 2;
 
-	/* One cache line per socket, so producers never share a busylock
-	 * cache line across sockets/NUMA nodes.  Keep the object at least
-	 * as big as spinlock_t (debug configs can enlarge it).
-	 */
-	udp_busylock_cache = kmem_cache_create("udp_busylock",
-				max_t(unsigned int, SMP_CACHE_BYTES,
-				      sizeof(spinlock_t)),
-				0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!udp_busylock_cache)
-		panic("UDP: failed to create udp_busylock cache\n");
-
 	__udp_sysctl_init(&init_net);
+
+	/* 16 spinlocks per cpu */
+	udp_busylocks_log = ilog2(nr_cpu_ids) + 4;
+	udp_busylocks = kmalloc(sizeof(spinlock_t) << udp_busylocks_log,
+				GFP_KERNEL);
+	if (!udp_busylocks)
+		panic("UDP: failed to alloc udp_busylocks\n");
+	for (i = 0; i < (1U << udp_busylocks_log); i++)
+		spin_lock_init(udp_busylocks + i);
 
 	if (register_pernet_subsys(&udp_sysctl_ops))
 		panic("UDP: failed to init sysctl parameters.\n");
