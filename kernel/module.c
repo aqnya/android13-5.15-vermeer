@@ -3624,6 +3624,12 @@ static const char * const custom_module_blacklist[] = {
 #if IS_BUILTIN(CONFIG_SCHED_WALT)
 	"sched_walt",
 #endif
+#if IS_BUILTIN(CONFIG_ZRAM)
+    "zram",
+#endif
+#if IS_BUILTIN(CONFIG_ZSMALLOC)
+    "zsmalloc",
+#endif
 	NULL,
 };
 
