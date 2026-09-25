@@ -42,7 +42,31 @@
 
 #define UPDATE_REASON(i, u)			(BIT(u) << (MAX_LPM_CPUS * i))
 
-bool prediction_disabled;
+/*
+ * gki-builder: qcom-lpm idle-state prediction defaults to OFF.
+ *
+ * Startup with prediction on leaves a per-CPU hrtimer (histtimer_fn) armed
+ * during idle; it fires when the CPU is still idle at predicted+100us, which
+ * is a full idle exit/re-enter whose only job is to invalidate a history
+ * sample.  Measured on vermeer (screen on / light load, ftrace
+ * hrtimer_expire_entry histograms): histtimer_fn ~740/s across 8 CPUs, versus
+ * softlockup watchdog_timer_fn ~1/s total; forcing prediction_disabled=1
+ * removed ~8.5k hrtimer expiries per 15s and no other callback went up.
+ *
+ * Prediction only gates whether a state whose target_residency exceeds the
+ * predicted sleep is skipped; the residency check against the real next-timer
+ * (tick_nohz_get_sleep_length) still applies, so deep states are still chosen.
+ * Keeping it off trades some state-selection refinement for fewer idle exits.
+ *
+ * Reversible at runtime without a reflash, for A/B:
+ *   echo 0 > /sys/devices/system/cpu/qcom_lpm/parameters/prediction_disabled
+ *   (or  echo 1 > ...  to re-disable)
+ * Quantify with device/standby-probe.sh <sec> ab (run screen-off).
+ *
+ * KMI: this is only the initial value of a driver-local bool.  No struct
+ * layout, no symbol set, no module-visible surface changes.
+ */
+bool prediction_disabled = true;
 bool sleep_disabled = true;
 static bool suspend_in_progress;
 static bool traces_registered;
