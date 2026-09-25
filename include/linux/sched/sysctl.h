@@ -16,6 +16,13 @@ enum { sysctl_hung_task_timeout_secs = 0 };
 
 extern unsigned int sysctl_sched_child_runs_first;
 
+/*
+ * /proc/sys/kernel/sched_nohz_stats_ms - cadence (ms) at which the NOHZ
+ * idle load balancer refreshes idle CPUs' blocked load.  Lower = more
+ * frequent idle-CPU wakeups, higher = staler stats.
+ */
+extern unsigned int sysctl_sched_nohz_stats_ms;
+
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,
 	SCHED_TUNABLESCALING_LOG,

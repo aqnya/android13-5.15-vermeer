@@ -1852,6 +1852,15 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= sched_pelt_multiplier,
 	},
 #endif
+	{
+		.procname	= "sched_nohz_stats_ms",
+		.data		= &sysctl_sched_nohz_stats_ms,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
+	},
 #ifdef CONFIG_UCLAMP_TASK
 	{
 		.procname	= "sched_util_clamp_min",
