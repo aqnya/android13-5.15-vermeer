@@ -224,4 +224,14 @@ static inline void set_notify_signal(struct task_struct *task)
 		kick_process(task);
 }
 
+/*
+ * Same as set_notify_signal(), except it doesn't force the target to
+ * reschedule (no IPI). The task_work will be run whenever the task next
+ * transitions to userspace.
+ */
+static inline void __set_notify_signal(struct task_struct *task)
+{
+	set_tsk_thread_flag(task, TIF_NOTIFY_SIGNAL);
+}
+
 #endif	/* <linux/tracehook.h> */
