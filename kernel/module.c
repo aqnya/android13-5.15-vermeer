@@ -3630,6 +3630,9 @@ static const char * const custom_module_blacklist[] = {
 #if IS_BUILTIN(CONFIG_ZSMALLOC)
     "zsmalloc",
 #endif
+#if IS_BUILTIN(CONFIG_HWSPINLOCK_QCOM)
+    "qcom_hwspinlock",
+#endif
 	NULL,
 };
 
