@@ -11055,9 +11055,17 @@ static void _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 	if (likely(update_next_balance))
 		nohz.next_balance = next_balance;
 
+	/*
+	 * Blocked load decays lazily and the same values get refreshed by the
+	 * on-demand kicks and by the update done on the way into idle, so this
+	 * timer only has to stop the statistics from going stale for good.
+	 * Keeping it at LOAD_AVG_PERIOD means waking an idle CPU out of idle
+	 * up to 30 times a second (IPI plus a walk of every idle CPU's blocked
+	 * load) for no placement benefit; a quarter of that rate is plenty.
+	 */
 	if (flags & NOHZ_STATS_KICK)
 		WRITE_ONCE(nohz.next_blocked,
-			   now + msecs_to_jiffies(LOAD_AVG_PERIOD));
+			   now + msecs_to_jiffies(4 * LOAD_AVG_PERIOD));
 
 abort:
 	/* There is still blocked load, enable periodic update */
