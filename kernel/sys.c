@@ -1270,11 +1270,20 @@ static int override_release(char __user *release, size_t len)
 	int ret = 0;
 
 	if (current->personality & UNAME26) {
-		const char *rest = UTS_RELEASE;
+		char relbuf[__NEW_UTS_LEN + 1];
+		const char *rest;
 		char buf[65] = { 0 };
 		int ndots = 0;
 		unsigned v;
 		size_t copy;
+
+		/* Use the runtime release so a faked uname stays
+		 * consistent for UNAME26 processes too.
+		 */
+		down_read(&uts_sem);
+		strscpy(relbuf, utsname()->release, sizeof(relbuf));
+		up_read(&uts_sem);
+		rest = relbuf;
 
 		while (*rest) {
 			if (*rest == '.' && ++ndots >= 3)
