@@ -4597,15 +4597,6 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 		return true;
 	}
 
-	/* dirty lazyfree */
-	if (type == LRU_GEN_FILE && PageAnon(page) && PageDirty(page)) {
-		success = lru_gen_del_page(lruvec, page, true);
-		VM_WARN_ON_ONCE_PAGE(!success, page);
-		SetPageSwapBacked(page);
-		add_page_to_lru_list_tail(page, lruvec);
-		return true;
-	}
-
 	/* promoted */
 	if (gen != lru_gen_from_seq(lrugen->min_seq[type])) {
 		list_move(&page->lru, &lrugen->lists[gen][type][zone]);

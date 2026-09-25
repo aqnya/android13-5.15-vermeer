@@ -10,12 +10,16 @@
 
 #include <linux/init.h>
 #include <linux/cpu.h>
+#include <linux/elf.h>
+#include <linux/string.h>
 #include <asm/cacheflush.h>
 #include <asm/alternative.h>
 #include <asm/cpufeature.h>
 #include <asm/insn.h>
 #include <asm/sections.h>
 #include <linux/stop_machine.h>
+
+extern char vdso_start[];
 
 #define __ALT_PTR(a, f)		((void *)&(a)->f + (a)->f)
 #define ALT_ORIG_PTR(a)		__ALT_PTR(a, orig_offset)
@@ -223,10 +227,51 @@ static int __apply_alternatives_multi_stop(void *unused)
 	return 0;
 }
 
+static void __init apply_alternatives_vdso(void);
+
 void __init apply_alternatives_all(void)
 {
+	apply_alternatives_vdso();
 	/* better not try code patching on a live SMP system */
 	stop_machine(__apply_alternatives_multi_stop, NULL, cpu_online_mask);
+}
+static const struct elf64_shdr *find_vdso_section(const struct elf64_hdr *hdr,
+						  const struct elf64_shdr *shdr,
+						  const char *name)
+{
+	const struct elf64_shdr *s, *se;
+	const char *secstrs = (void *)hdr + shdr[hdr->e_shstrndx].sh_offset;
+
+	for (s = shdr, se = shdr + hdr->e_shnum; s < se; s++) {
+		if (strcmp(name, secstrs + s->sh_name) == 0)
+			return s;
+	}
+
+	return NULL;
+}
+
+static void __init apply_alternatives_vdso(void)
+{
+	struct alt_region region;
+	const struct elf64_hdr *hdr;
+	const struct elf64_shdr *shdr;
+	const struct elf64_shdr *alt;
+	DECLARE_BITMAP(all_capabilities, ARM64_NPATCHABLE);
+
+	bitmap_fill(all_capabilities, ARM64_NPATCHABLE);
+
+	hdr = (struct elf64_hdr *)vdso_start;
+	shdr = (void *)hdr + hdr->e_shoff;
+	alt = find_vdso_section(hdr, shdr, ".altinstructions");
+	if (!alt)
+		return;
+
+	region = (struct alt_region){
+		.begin	= (void *)hdr + alt->sh_offset,
+		.end	= (void *)hdr + alt->sh_offset + alt->sh_size,
+	};
+
+	__apply_alternatives(&region, false, &all_capabilities[0]);
 }
 
 /*

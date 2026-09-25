@@ -5312,6 +5312,7 @@ vm_fault_t do_handle_mm_fault(struct vm_area_struct *vma,
 		unsigned long seq, struct pt_regs *regs)
 {
 	vm_fault_t ret;
+	bool is_droppable;
 
 	VM_BUG_ON((flags & FAULT_FLAG_SPECULATIVE) &&
 		  !vma_can_speculate(vma, flags));
@@ -5338,6 +5339,8 @@ vm_fault_t do_handle_mm_fault(struct vm_area_struct *vma,
 
 	lru_gen_enter_fault(vma);
 
+	is_droppable = !!(vma->vm_flags & VM_DROPPABLE);
+
 	if (unlikely(is_vm_hugetlb_page(vma))) {
 		VM_BUG_ON(flags & FAULT_FLAG_SPECULATIVE);
 		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
@@ -5346,6 +5349,10 @@ vm_fault_t do_handle_mm_fault(struct vm_area_struct *vma,
 	}
 
 	lru_gen_exit_fault();
+
+	/* If the mapping is droppable, then errors due to OOM aren't fatal. */
+	if (is_droppable)
+		ret &= ~VM_FAULT_OOM;
 
 	if (flags & FAULT_FLAG_USER) {
 		mem_cgroup_exit_user_fault();

@@ -55,6 +55,10 @@
 #include <linux/uio.h>
 #include <crypto/chacha.h>
 #include <crypto/blake2s.h>
+#ifdef CONFIG_VDSO_GETRANDOM
+#include <vdso/datapage.h>
+#include <vdso/vsyscall.h>
+#endif
 #include <asm/processor.h>
 #include <asm/irq.h>
 #include <asm/irq_regs.h>
@@ -268,6 +272,15 @@ static void crng_reseed(void)
 	if (next_gen == ULONG_MAX)
 		++next_gen;
 	WRITE_ONCE(base_crng.generation, next_gen);
+#ifdef CONFIG_VDSO_GETRANDOM
+	/* base_crng.generation's invalid value is ULONG_MAX, while
+	 * _vdso_rng_data.generation's invalid value is 0, so add one to the
+	 * former to arrive at the latter. Use smp_store_release so that this
+	 * is ordered with the write above to base_crng.generation. Pairs with
+	 * the smp_rmb() before the syscall in the vDSO code.
+	 */
+	smp_store_release(&__arch_get_k_vdso_rng_data()->generation, next_gen + 1);
+#endif
 	WRITE_ONCE(base_crng.birth, jiffies);
 	if (!crng_ready())
 		crng_init = CRNG_READY;
@@ -730,6 +743,9 @@ static void __cold _credit_init_bits(size_t bits)
 		process_random_ready_list();
 		wake_up_interruptible(&crng_init_wait);
 		kill_fasync(&fasync, SIGIO, POLL_IN);
+#ifdef CONFIG_VDSO_GETRANDOM
+		WRITE_ONCE(__arch_get_k_vdso_rng_data()->is_ready, true);
+#endif
 		pr_notice("crng init done\n");
 		if (urandom_warning.missed)
 			pr_notice("%d urandom warning(s) missed due to ratelimiting\n",
