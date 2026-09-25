@@ -3621,6 +3621,9 @@ static const char * const custom_module_blacklist[] = {
 #if IS_BUILTIN(CONFIG_ARM_QCOM_CPUFREQ_HW)
 	"qcom_cpufreq_hw",
 #endif
+#if IS_BUILTIN(CONFIG_SCHED_WALT)
+	"sched_walt",
+#endif
 	NULL,
 };
 
