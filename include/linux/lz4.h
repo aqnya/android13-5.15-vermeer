@@ -44,6 +44,11 @@
 #include <linux/types.h>
 #include <linux/string.h>	 /* memset, memcpy */
 
+typedef int8_t LZ4_i8;
+typedef uint8_t LZ4_byte;
+typedef uint16_t LZ4_u16;
+typedef uint32_t LZ4_u32;
+
 /*-************************************************************************
  *	CONSTANTS
  **************************************************************************/
@@ -82,54 +87,60 @@
 /*-************************************************************************
  *	STREAMING CONSTANTS AND STRUCTURES
  **************************************************************************/
-#define LZ4_STREAMSIZE_U64 ((1 << (LZ4_MEMORY_USAGE - 3)) + 4)
-#define LZ4_STREAMSIZE	(LZ4_STREAMSIZE_U64 * sizeof(unsigned long long))
+#define LZ4_STREAM_MINSIZE	((1UL << LZ4_MEMORY_USAGE) + 32)
+#define LZ4_STREAMSIZE		LZ4_STREAM_MINSIZE
 
-#define LZ4_STREAMHCSIZE        262192
-#define LZ4_STREAMHCSIZE_SIZET (262192 / sizeof(size_t))
+#define LZ4_STREAMHC_MINSIZE	262200
+#define LZ4_STREAMHCSIZE	LZ4_STREAMHC_MINSIZE
 
-#define LZ4_STREAMDECODESIZE_U64	4
-#define LZ4_STREAMDECODESIZE		 (LZ4_STREAMDECODESIZE_U64 * \
-	sizeof(unsigned long long))
+#define LZ4_STREAMDECODE_MINSIZE	32
+#define LZ4_STREAMDECODESIZE		LZ4_STREAMDECODE_MINSIZE
 
 /*
  * LZ4_stream_t - information structure to track an LZ4 stream.
  */
-typedef struct {
-	uint32_t hashTable[LZ4_HASH_SIZE_U32];
-	uint32_t currentOffset;
-	uint32_t initCheck;
-	const uint8_t *dictionary;
-	uint8_t *bufferStart;
-	uint32_t dictSize;
-} LZ4_stream_t_internal;
+typedef struct LZ4_stream_t_internal LZ4_stream_t_internal;
+struct LZ4_stream_t_internal {
+	LZ4_u32 hashTable[LZ4_HASH_SIZE_U32];
+	const LZ4_byte *dictionary;
+	const LZ4_stream_t_internal *dictCtx;
+	LZ4_u32 currentOffset;
+	LZ4_u32 tableType;
+	LZ4_u32 dictSize;
+};
 typedef union {
-	unsigned long long table[LZ4_STREAMSIZE_U64];
+	char minStateSize[LZ4_STREAM_MINSIZE];
 	LZ4_stream_t_internal internal_donotuse;
 } LZ4_stream_t;
 
 /*
  * LZ4_streamHC_t - information structure to track an LZ4HC stream.
  */
-typedef struct {
-	unsigned int	 hashTable[LZ4HC_HASHTABLESIZE];
-	unsigned short	 chainTable[LZ4HC_MAXD];
-	/* next block to continue on current prefix */
-	const unsigned char *end;
-	/* All index relative to this position */
-	const unsigned char *base;
-	/* alternate base for extDict */
-	const unsigned char *dictBase;
+typedef struct LZ4HC_CCtx_internal LZ4HC_CCtx_internal;
+struct LZ4HC_CCtx_internal {
+	LZ4_u32 hashTable[LZ4HC_HASHTABLESIZE];
+	LZ4_u16 chainTable[LZ4HC_MAXD];
+	/* next block here to continue on current prefix */
+	const LZ4_byte *end;
+	/* Indexes relative to this position */
+	const LZ4_byte *prefixStart;
+	/* alternate reference for extDict */
+	const LZ4_byte *dictStart;
 	/* below that point, need extDict */
-	unsigned int	 dictLimit;
-	/* below that point, no more dict */
-	unsigned int	 lowLimit;
-	/* index from which to continue dict update */
-	unsigned int	 nextToUpdate;
-	unsigned int	 compressionLevel;
-} LZ4HC_CCtx_internal;
+	LZ4_u32 dictLimit;
+	/* below that point, no more history */
+	LZ4_u32 lowLimit;
+	/* index from which to continue dictionary update */
+	LZ4_u32 nextToUpdate;
+	short	compressionLevel;
+	/* favor decompression speed if this flag set */
+	LZ4_i8	favorDecSpeed;
+	/* stream has to be fully reset if this flag is set */
+	LZ4_i8	dirty;
+	const LZ4HC_CCtx_internal *dictCtx;
+};
 typedef union {
-	size_t table[LZ4_STREAMHCSIZE_SIZET];
+	char minStateSize[LZ4_STREAMHC_MINSIZE];
 	LZ4HC_CCtx_internal internal_donotuse;
 } LZ4_streamHC_t;
 
@@ -140,13 +151,13 @@ typedef union {
  * init this structure using LZ4_setStreamDecode (or memset()) before first use
  */
 typedef struct {
-	const uint8_t *externalDict;
+	const LZ4_byte *externalDict;
+	const LZ4_byte *prefixEnd;
 	size_t extDictSize;
-	const uint8_t *prefixEnd;
 	size_t prefixSize;
 } LZ4_streamDecode_t_internal;
 typedef union {
-	unsigned long long table[LZ4_STREAMDECODESIZE_U64];
+	char minStateSize[LZ4_STREAMDECODE_MINSIZE];
 	LZ4_streamDecode_t_internal internal_donotuse;
 } LZ4_streamDecode_t;
 

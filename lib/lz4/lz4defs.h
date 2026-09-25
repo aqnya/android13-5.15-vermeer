@@ -1,11 +1,12 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 #ifndef __LZ4DEFS_H__
 #define __LZ4DEFS_H__
 
 /*
  * lz4defs.h -- common and architecture specific defines for the kernel usage
-
+ *
  * LZ4 - Fast LZ compression algorithm
- * Copyright (C) 2011-2016, Yann Collet.
+ * Copyright (C) 2011-2023, Yann Collet.
  * BSD 2-Clause License (http://www.opensource.org/licenses/bsd-license.php)
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -33,109 +34,79 @@
  *
  *	Changed for kernel usage by:
  *	Sven Schmidt <4sschmid@informatik.uni-hamburg.de>
+ *
+ *	Updated to LZ4 v1.10.0 algorithm.
  */
 
-#include <asm/unaligned.h>
-#include <linux/string.h>	 /* memset, memcpy */
-
-#define FORCE_INLINE __always_inline
-
-/*-************************************
- *	Basic Types
- **************************************/
 #include <linux/types.h>
-
-typedef	uint8_t BYTE;
-typedef uint16_t U16;
-typedef uint32_t U32;
-typedef	int32_t S32;
-typedef uint64_t U64;
-typedef uintptr_t uptrval;
+#include <linux/string.h>	 /* memset, memcpy */
+#include <linux/bitops.h>
+#include <linux/build_bug.h>
+#include <linux/lz4.h>
+#include <asm/unaligned.h>
 
 /*-************************************
- *	Architecture specifics
+ *	Tuning parameters
  **************************************/
-#if defined(CONFIG_64BIT)
-#define LZ4_ARCH64 1
-#else
-#define LZ4_ARCH64 0
-#endif
-
-#if defined(__LITTLE_ENDIAN)
-#define LZ4_LITTLE_ENDIAN 1
-#else
-#define LZ4_LITTLE_ENDIAN 0
-#endif
-
-/*-************************************
- *	Constants
- **************************************/
-#define MINMATCH 4
-
-#define WILDCOPYLENGTH 8
-#define LASTLITERALS 5
-#define MFLIMIT (WILDCOPYLENGTH + MINMATCH)
 /*
- * ensure it's possible to write 2 x wildcopyLength
- * without overflowing output buffer
+ * LZ4_HEAPMODE :
+ * Select how stateless compression functions like `LZ4_compress_default()`
+ * allocate memory for their hash table, in memory stack (0:default, fastest),
+ * or in memory heap (1:requires malloc()).
  */
-#define MATCH_SAFEGUARD_DISTANCE  ((2 * WILDCOPYLENGTH) - MINMATCH)
+#ifndef LZ4_HEAPMODE
+#  define LZ4_HEAPMODE 0
+#endif
 
-/* Increase this value ==> compression run slower on incompressible data */
-#define LZ4_SKIPTRIGGER 6
+#ifndef LZ4_ACCELERATION_DEFAULT
+#  define LZ4_ACCELERATION_DEFAULT 1
+#endif
+#define LZ4_ACCELERATION_MAX 65537
 
-#define HASH_UNIT sizeof(size_t)
-
-#define KB (1 << 10)
-#define MB (1 << 20)
-#define GB (1U << 30)
-
-#define MAXD_LOG 16
-#define MAX_DISTANCE ((1 << MAXD_LOG) - 1)
-#define STEPSIZE sizeof(size_t)
-
-#define ML_BITS	4
-#define ML_MASK	((1U << ML_BITS) - 1)
-#define RUN_BITS (8 - ML_BITS)
-#define RUN_MASK ((1U << RUN_BITS) - 1)
+/*
+ * The kernel does not provide malloc()/calloc()/free(), and the high level
+ * functions using them are not part of the kernel API, so they are disabled.
+ */
+#define LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION
 
 /*-************************************
- *	Reading and writing into memory
+ *	Compiler Options
  **************************************/
-static FORCE_INLINE U16 LZ4_read16(const void *ptr)
-{
-	return get_unaligned((const U16 *)ptr);
-}
+#define LZ4_FORCE_INLINE static __always_inline
+#define LZ4_FORCE_O2
 
-static FORCE_INLINE U32 LZ4_read32(const void *ptr)
-{
-	return get_unaligned((const U32 *)ptr);
-}
+#ifndef likely
+#define likely(expr)	(__builtin_expect(!!(expr), 1))
+#endif
+#ifndef unlikely
+#define unlikely(expr)	(__builtin_expect(!!(expr), 0))
+#endif
 
-static FORCE_INLINE size_t LZ4_read_ARCH(const void *ptr)
-{
-	return get_unaligned((const size_t *)ptr);
-}
+/* Should the alignment test prove unreliable, it can be disabled here. */
+#define LZ4_ALIGN_TEST 1
 
-static FORCE_INLINE void LZ4_write16(void *memPtr, U16 value)
-{
-	put_unaligned(value, (U16 *)memPtr);
-}
+/*-************************************
+ *	Error detection
+ **************************************/
+#ifndef assert
+#  define assert(condition) ((void)0)
+#endif
 
-static FORCE_INLINE void LZ4_write32(void *memPtr, U32 value)
-{
-	put_unaligned(value, (U32 *)memPtr);
-}
+#define LZ4_STATIC_ASSERT(c)	BUILD_BUG_ON(!(c))
 
-static FORCE_INLINE U16 LZ4_readLE16(const void *memPtr)
-{
-	return get_unaligned_le16(memPtr);
-}
+#if defined(LZ4_DEBUG) && (LZ4_DEBUG >= 2)
+#  define DEBUGLOG(l, ...) {						\
+	if (l <= LZ4_DEBUG)						\
+		pr_debug(__FILE__ " %i: " __VA_ARGS__, __LINE__);	\
+	}
+#else
+#  define DEBUGLOG(l, ...) {}	/* disabled */
+#endif
 
-static FORCE_INLINE void LZ4_writeLE16(void *memPtr, U16 value)
-{
-	return put_unaligned_le16(value, memPtr);
-}
+/*-************************************
+ *	Memory routines
+ **************************************/
+#define MEM_INIT(p, v, s)	memset((p), (v), (s))
 
 /*
  * LZ4 relies on memcpy with a constant size being inlined. In freestanding
@@ -148,98 +119,285 @@ static FORCE_INLINE void LZ4_writeLE16(void *memPtr, U16 value)
 #define LZ4_memcpy(dst, src, size) __builtin_memcpy(dst, src, size)
 #define LZ4_memmove(dst, src, size) __builtin_memmove(dst, src, size)
 
-static FORCE_INLINE void LZ4_copy8(void *dst, const void *src)
+/*-************************************
+ *	Common Constants
+ **************************************/
+#define MINMATCH 4
+
+#define WILDCOPYLENGTH 8
+#define LASTLITERALS   5
+#define MFLIMIT       12
+/*
+ * ensure it's possible to write 2 x wildcopyLength
+ * without overflowing output buffer
+ */
+#define MATCH_SAFEGUARD_DISTANCE  ((2 * WILDCOPYLENGTH) - MINMATCH)
+#define FASTLOOP_SAFE_DISTANCE 64
+#define LZ4_minLength (MFLIMIT + 1)
+
+#define KB *(1 << 10)
+#define MB *(1 << 20)
+#define GB *(1U << 30)
+
+#ifndef LZ4_DISTANCE_MAX
+#  define LZ4_DISTANCE_MAX 65535	/* max supported by LZ4 format */
+#endif
+#define LZ4_DISTANCE_ABSOLUTE_MAX 65535
+#if (LZ4_DISTANCE_MAX > LZ4_DISTANCE_ABSOLUTE_MAX)
+#  error "LZ4_DISTANCE_MAX is too big : must be <= 65535"
+#endif
+
+#define ML_BITS	4
+#define ML_MASK	((1U << ML_BITS) - 1)
+#define RUN_BITS (8 - ML_BITS)
+#define RUN_MASK ((1U << RUN_BITS) - 1)
+
+/*-************************************
+ *	Types
+ **************************************/
+typedef	uint8_t BYTE;
+typedef uint16_t U16;
+typedef uint32_t U32;
+typedef int32_t S32;
+typedef uint64_t U64;
+typedef uintptr_t uptrval;
+typedef size_t reg_t;	/* native register width (kernel uses size_t) */
+
+typedef enum {
+	notLimited = 0,
+	limitedOutput = 1,
+	fillOutput = 2
+} limitedOutput_directive;
+
+typedef enum {
+	noDict = 0,
+	withPrefix64k,
+	usingExtDict,
+	usingDictCtx
+} dict_directive;
+
+typedef enum { noDictIssue = 0, dictSmall } dictIssue_directive;
+
+/* defined in lz4_compress.c */
+LZ4_stream_t *LZ4_initStream(void *buffer, size_t size);
+
+/*-************************************
+ *	Reading and writing into memory
+ **************************************/
+static __always_inline U16 LZ4_read16(const void *ptr)
 {
-#if LZ4_ARCH64
-	U64 a = get_unaligned((const U64 *)src);
+	return get_unaligned((const U16 *)ptr);
+}
 
-	put_unaligned(a, (U64 *)dst);
+static __always_inline U32 LZ4_read32(const void *ptr)
+{
+	return get_unaligned((const U32 *)ptr);
+}
+
+static __always_inline reg_t LZ4_read_ARCH(const void *ptr)
+{
+	return get_unaligned((const reg_t *)ptr);
+}
+
+static __always_inline void LZ4_write16(void *memPtr, U16 value)
+{
+	put_unaligned(value, (U16 *)memPtr);
+}
+
+static __always_inline void LZ4_write32(void *memPtr, U32 value)
+{
+	put_unaligned(value, (U32 *)memPtr);
+}
+
+static __always_inline unsigned int LZ4_isLittleEndian(void)
+{
+#if defined(__LITTLE_ENDIAN)
+	return 1;
 #else
-	U32 a = get_unaligned((const U32 *)src);
-	U32 b = get_unaligned((const U32 *)src + 1);
-
-	put_unaligned(a, (U32 *)dst);
-	put_unaligned(b, (U32 *)dst + 1);
+	return 0;
 #endif
 }
 
-/*
- * customized variant of memcpy,
- * which can overwrite up to 7 bytes beyond dstEnd
- */
-static FORCE_INLINE void LZ4_wildCopy(void *dstPtr,
-	const void *srcPtr, void *dstEnd)
+static __always_inline U16 LZ4_readLE16(const void *memPtr)
+{
+	return get_unaligned_le16(memPtr);
+}
+
+static __always_inline void LZ4_writeLE16(void *memPtr, U16 value)
+{
+	put_unaligned_le16(value, memPtr);
+}
+
+/* customized variant of memcpy, which can overwrite up to 8 bytes beyond dstEnd */
+static __always_inline void LZ4_wildCopy8(void *dstPtr, const void *srcPtr,
+					  void *dstEnd)
 {
 	BYTE *d = (BYTE *)dstPtr;
 	const BYTE *s = (const BYTE *)srcPtr;
 	BYTE *const e = (BYTE *)dstEnd;
 
 	do {
-		LZ4_copy8(d, s);
+		LZ4_memcpy(d, s, 8);
 		d += 8;
 		s += 8;
 	} while (d < e);
 }
 
-static FORCE_INLINE unsigned int LZ4_NbCommonBytes(register size_t val)
+static __maybe_unused const unsigned int inc32table[8] = {
+	0, 1, 2, 1, 0, 4, 4, 4
+};
+static __maybe_unused const int dec64table[8] = {
+	0, 0, 0, -1, -4, 1, 2, 3
+};
+
+#ifndef LZ4_FAST_DEC_LOOP
+#  if defined(__i386__) || defined(__x86_64__)
+#    define LZ4_FAST_DEC_LOOP 1
+#  elif defined(__aarch64__) && !defined(__clang__)
+#    define LZ4_FAST_DEC_LOOP 1
+#  else
+#    define LZ4_FAST_DEC_LOOP 0
+#  endif
+#endif
+
+#if LZ4_FAST_DEC_LOOP
+static __always_inline void
+LZ4_memcpy_using_offset_base(BYTE *dstPtr, const BYTE *srcPtr, BYTE *dstEnd,
+			     const size_t offset)
 {
-#if LZ4_LITTLE_ENDIAN
+	if (offset < 8) {
+		LZ4_write32(dstPtr, 0);	/* silence an msan warning when offset==0 */
+		dstPtr[0] = srcPtr[0];
+		dstPtr[1] = srcPtr[1];
+		dstPtr[2] = srcPtr[2];
+		dstPtr[3] = srcPtr[3];
+		srcPtr += inc32table[offset];
+		LZ4_memcpy(dstPtr + 4, srcPtr, 4);
+		srcPtr -= dec64table[offset];
+		dstPtr += 8;
+	} else {
+		LZ4_memcpy(dstPtr, srcPtr, 8);
+		dstPtr += 8;
+		srcPtr += 8;
+	}
+
+	LZ4_wildCopy8(dstPtr, srcPtr, dstEnd);
+}
+
+/* customized variant of memcpy, which can overwrite up to 32 bytes beyond dstEnd
+ * this version copies two times 16 bytes (instead of one time 32 bytes)
+ * because it must be compatible with offsets >= 16. */
+static __always_inline void LZ4_wildCopy32(void *dstPtr, const void *srcPtr,
+					   void *dstEnd)
+{
+	BYTE *d = (BYTE *)dstPtr;
+	const BYTE *s = (const BYTE *)srcPtr;
+	BYTE *const e = (BYTE *)dstEnd;
+
+	do {
+		LZ4_memcpy(d, s, 16);
+		LZ4_memcpy(d + 16, s + 16, 16);
+		d += 32;
+		s += 32;
+	} while (d < e);
+}
+
+/* LZ4_memcpy_using_offset()  presumes :
+ * - dstEnd >= dstPtr + MINMATCH
+ * - there is at least 12 bytes available to write after dstEnd */
+static __always_inline void
+LZ4_memcpy_using_offset(BYTE *dstPtr, const BYTE *srcPtr, BYTE *dstEnd,
+			const size_t offset)
+{
+	BYTE v[8];
+
+	switch (offset) {
+	case 1:
+		MEM_INIT(v, *srcPtr, 8);
+		break;
+	case 2:
+		LZ4_memcpy(v, srcPtr, 2);
+		LZ4_memcpy(&v[2], srcPtr, 2);
+		LZ4_memcpy(&v[4], v, 4);
+		break;
+	case 4:
+		LZ4_memcpy(v, srcPtr, 4);
+		LZ4_memcpy(&v[4], srcPtr, 4);
+		break;
+	default:
+		LZ4_memcpy_using_offset_base(dstPtr, srcPtr, dstEnd, offset);
+		return;
+	}
+
+	LZ4_memcpy(dstPtr, v, 8);
+	dstPtr += 8;
+	while (dstPtr < dstEnd) {
+		LZ4_memcpy(dstPtr, v, 8);
+		dstPtr += 8;
+	}
+}
+#endif
+
+/*-************************************
+ *	Common functions
+ **************************************/
+static __always_inline unsigned int LZ4_NbCommonBytes(reg_t val)
+{
+#if defined(__LITTLE_ENDIAN)
 	return __ffs(val) >> 3;
 #else
 	return (BITS_PER_LONG - 1 - __fls(val)) >> 3;
 #endif
 }
 
-static FORCE_INLINE unsigned int LZ4_count(
-	const BYTE *pIn,
-	const BYTE *pMatch,
-	const BYTE *pInLimit)
+#define STEPSIZE sizeof(reg_t)
+static __always_inline unsigned int LZ4_count(const BYTE *pIn,
+					      const BYTE *pMatch,
+					      const BYTE *pInLimit)
 {
 	const BYTE *const pStart = pIn;
 
+	if (likely(pIn < pInLimit - (STEPSIZE - 1))) {
+		reg_t const diff = LZ4_read_ARCH(pMatch) ^ LZ4_read_ARCH(pIn);
+
+		if (!diff) {
+			pIn += STEPSIZE;
+			pMatch += STEPSIZE;
+		} else {
+			return LZ4_NbCommonBytes(diff);
+		}
+	}
+
 	while (likely(pIn < pInLimit - (STEPSIZE - 1))) {
-		size_t const diff = LZ4_read_ARCH(pMatch) ^ LZ4_read_ARCH(pIn);
+		reg_t const diff = LZ4_read_ARCH(pMatch) ^ LZ4_read_ARCH(pIn);
 
 		if (!diff) {
 			pIn += STEPSIZE;
 			pMatch += STEPSIZE;
 			continue;
 		}
-
 		pIn += LZ4_NbCommonBytes(diff);
-
 		return (unsigned int)(pIn - pStart);
 	}
 
-#if LZ4_ARCH64
-	if ((pIn < (pInLimit - 3))
-		&& (LZ4_read32(pMatch) == LZ4_read32(pIn))) {
+	if ((STEPSIZE == 8) && (pIn < (pInLimit - 3))
+			&& (LZ4_read32(pMatch) == LZ4_read32(pIn))) {
 		pIn += 4;
 		pMatch += 4;
 	}
-#endif
-
 	if ((pIn < (pInLimit - 1))
-		&& (LZ4_read16(pMatch) == LZ4_read16(pIn))) {
+			&& (LZ4_read16(pMatch) == LZ4_read16(pIn))) {
 		pIn += 2;
 		pMatch += 2;
 	}
-
 	if ((pIn < pInLimit) && (*pMatch == *pIn))
 		pIn++;
-
 	return (unsigned int)(pIn - pStart);
 }
 
-typedef enum { noLimit = 0, limitedOutput = 1 } limitedOutput_directive;
-typedef enum { byPtr, byU32, byU16 } tableType_t;
-
-typedef enum { noDict = 0, withPrefix64k, usingExtDict } dict_directive;
-typedef enum { noDictIssue = 0, dictSmall } dictIssue_directive;
-
-typedef enum { endOnOutputSize = 0, endOnInputSize = 1 } endCondition_directive;
-typedef enum { decode_full_block = 0, partial_decode = 1 } earlyEnd_directive;
-
-#define LZ4_STATIC_ASSERT(c)	BUILD_BUG_ON(!(c))
+static __always_inline int LZ4_isAligned(const void *ptr, size_t alignment)
+{
+	return ((size_t)ptr & (alignment - 1)) == 0;
+}
 
 #endif
