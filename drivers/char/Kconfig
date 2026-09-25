@@ -464,4 +464,16 @@ config RANDOM_TRUST_BOOTLOADER
 	  believe its RNG facilities may be faulty. This may also be configured
 	  at boot time with "random.trust_bootloader=on/off".
 
+config FAKE_UNAME
+	bool "Fake uname via /sys/kernel/fakeuname"
+	default y
+	help
+	  Add /sys/kernel/fakeuname/ (0644, root-writable) so privileged
+	  userspace can override the utsname fields (sysname, nodename,
+	  release, version, machine, domainname) returned by uname(2),
+	  gethostname(2), /proc/version and /proc/sys/kernel/*, keeping
+	  all of those surfaces consistent with each other.
+
+	  If unsure, say Y.
+
 endmenu
