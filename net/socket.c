@@ -109,6 +109,8 @@
 #ifdef CONFIG_NET_RX_BUSY_POLL
 unsigned int sysctl_net_busy_read __read_mostly;
 unsigned int sysctl_net_busy_poll __read_mostly;
+/* IRQ suspension safety timeout, in ns; default on for 1ms. */
+unsigned int sysctl_net_irq_suspend_timeout __read_mostly = 1000000;
 #endif
 
 static ssize_t sock_read_iter(struct kiocb *iocb, struct iov_iter *to);
