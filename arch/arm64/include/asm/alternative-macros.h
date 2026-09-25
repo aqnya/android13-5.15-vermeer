@@ -208,6 +208,49 @@ alternative_endif
 #define ALTERNATIVE(oldinstr, newinstr, ...)   \
 	_ALTERNATIVE_CFG(oldinstr, newinstr, __VA_ARGS__, 1)
 
+#ifndef __ASSEMBLY__
+
+#include <linux/compiler.h>
+#include <linux/types.h>
+
+static __always_inline bool
+alternative_has_cap_likely(const unsigned long cpucap)
+{
+	if (cpucap >= ARM64_NCAPS)
+		return false;
+
+	asm goto(
+	ALTERNATIVE("b	%l[l_no]", "nop", %[cpucap])
+	:
+	: [cpucap] "i" (cpucap)
+	:
+	: l_no);
+
+	return true;
+l_no:
+	return false;
+}
+
+static __always_inline bool
+alternative_has_cap_unlikely(const unsigned long cpucap)
+{
+	if (cpucap >= ARM64_NCAPS)
+		return false;
+
+	asm goto(
+	ALTERNATIVE("nop", "b	%l[l_yes]", %[cpucap])
+	:
+	: [cpucap] "i" (cpucap)
+	:
+	: l_yes);
+
+	return false;
+l_yes:
+	return true;
+}
+
+#endif /* !__ASSEMBLY__ */
+
 #else
 
 /*

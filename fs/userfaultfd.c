@@ -1317,6 +1317,9 @@ static inline bool vma_can_userfault(struct vm_area_struct *vma,
 			return false;
 	}
 
+	if (vm_flags & VM_DROPPABLE)
+		return false;
+
 	if (vm_flags & VM_UFFD_MINOR) {
 		if (!(is_vm_hugetlb_page(vma) || vma_is_shmem(vma)))
 			return false;
