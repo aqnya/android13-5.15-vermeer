@@ -1159,6 +1159,39 @@ static const char *config_cmdline = CONFIG_CMDLINE;
 static const char *config_cmdline = "";
 #endif
 
+static bool __init cmdline_has_param(const char *cmdline, const char *token,
+				     size_t token_len)
+{
+	size_t name_len = 0;
+	const char *p = cmdline;
+
+	while (name_len < token_len && token[name_len] != '=')
+		name_len++;
+
+	if (!name_len)
+		return false;
+
+	while (*p) {
+		size_t n = 0;
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (!*p)
+			break;
+
+		while (p[n] && p[n] != ' ' && p[n] != '\t')
+			n++;
+
+		if (n >= name_len && !strncmp(p, token, name_len) &&
+		    (n == name_len || p[name_len] == '='))
+			return true;
+
+		p += n;
+	}
+
+	return false;
+}
+
 int __init early_init_dt_scan_chosen(unsigned long node, const char *uname,
 				     int depth, void *data)
 {
@@ -1188,14 +1221,47 @@ int __init early_init_dt_scan_chosen(unsigned long node, const char *uname,
 
 	if (p != NULL && l > 0) {
 		if (concat_cmdline) {
-			int cmdline_len;
-			int copy_len;
-			strlcat(cmdline, " ", COMMAND_LINE_SIZE);
-			cmdline_len = strlen(cmdline);
-			copy_len = COMMAND_LINE_SIZE - cmdline_len - 1;
-			copy_len = min((int)l, copy_len);
-			strncpy(cmdline + cmdline_len, p, copy_len);
-			cmdline[cmdline_len + copy_len] = '\0';
+			const char *q = p;
+			const char *end = p + l;
+			int cmdline_len = strlen(cmdline);
+
+			while (q < end && cmdline_len < COMMAND_LINE_SIZE - 1) {
+				size_t token_len = 0;
+				int avail, copy_len;
+
+				while (q < end && (*q == ' ' || *q == '\t'))
+					q++;
+				if (q >= end || !*q)
+					break;
+
+				while (q + token_len < end &&
+				       q[token_len] != ' ' &&
+				       q[token_len] != '\t' &&
+				       q[token_len] != '\0')
+					token_len++;
+
+				if (cmdline_has_param(config_cmdline, q,
+						      token_len)) {
+					q += token_len;
+					continue;
+				}
+
+				avail = COMMAND_LINE_SIZE - cmdline_len - 1;
+				if (!avail)
+					break;
+
+				if (cmdline_len > 0) {
+					cmdline[cmdline_len++] = ' ';
+					avail--;
+				}
+
+				copy_len = min((int)token_len, avail);
+				memcpy(cmdline + cmdline_len, q, copy_len);
+				cmdline_len += copy_len;
+				cmdline[cmdline_len] = '\0';
+
+				q += token_len;
+			}
 		} else {
 			strlcpy(cmdline, p, min(l, COMMAND_LINE_SIZE));
 		}
