@@ -65,7 +65,7 @@ int udpv6_init_sock(struct sock *sk)
 {
 	skb_queue_head_init(&udp_sk(sk)->reader_queue);
 	sk->sk_destruct = udpv6_destruct_sock;
-	return udp_busylock_alloc(sk);
+	return 0;
 }
 
 INDIRECT_CALLABLE_SCOPE

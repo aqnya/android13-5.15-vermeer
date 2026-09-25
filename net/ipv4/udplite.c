@@ -20,11 +20,7 @@ EXPORT_SYMBOL(udplite_table);
 /* Designate sk as UDP-Lite socket */
 static int udplite_sk_init(struct sock *sk)
 {
-	int err;
-
-	err = udp_init_sock(sk);
-	if (err)
-		return err;
+	udp_init_sock(sk);
 	udp_sk(sk)->pcflag = UDPLITE_BIT;
 	return 0;
 }

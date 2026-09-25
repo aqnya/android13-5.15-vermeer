@@ -552,12 +552,7 @@ struct sock {
 	ANDROID_KABI_RESERVE(5);
 	ANDROID_KABI_RESERVE(6);
 	ANDROID_KABI_RESERVE(7);
-	/* Per-UDP-socket busylock: points to a cache-line aligned object
-	 * allocated outside struct sock (upstream 6.18 "udp: make busylock
-	 * per socket", 3cd04c8f4afe).  Stored in a KABI reserve so struct
-	 * sock layout/size is unchanged; only UDP sockets use it.
-	 */
-	ANDROID_KABI_USE(8, spinlock_t *sk_udp_busylock);
+	ANDROID_KABI_RESERVE(8);
 };
 
 enum sk_pacing {
