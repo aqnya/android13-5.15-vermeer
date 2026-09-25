@@ -1024,6 +1024,25 @@ config PANIC_TIMEOUT
 	  value n > 0 will wait n seconds before rebooting, while a timeout
 	  value n < 0 will reboot immediately.
 
+config CRASHLOG
+	bool "Save the kernel log to a file when the kernel panics"
+	default n
+	help
+	  Keep a file open on a writable filesystem (by default
+	  /data/kernel-crash.log) and append the whole kernel log to it,
+	  followed by an fsync(), whenever the kernel panics. Without this
+	  the log disappears with the reboot that follows a panic.
+
+	  The path can be set on the kernel command line with
+	  crashlog.path=, or at runtime through /sys/module/crashlog/parameters/,
+	  which also has "dump" (write to take a dump right now) and "status".
+
+	  The panic path runs with interrupts disabled and every other CPU
+	  stopped, so this is best effort: the write can still deadlock if the
+	  panic interrupted a task holding a lock in the same filesystem.
+
+	  Say N if unsure.
+
 config LOCKUP_DETECTOR
 	bool
 
