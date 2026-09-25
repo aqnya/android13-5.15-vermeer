@@ -105,7 +105,7 @@ static const struct regmap_config tcsr_mutex_config = {
 	.reg_bits		= 32,
 	.reg_stride		= 4,
 	.val_bits		= 32,
-	.max_register		= 0x20000,
+	.max_register		= 0x40000,
 	.fast_io		= true,
 };
 
@@ -165,6 +165,7 @@ static struct platform_driver qcom_hwspinlock_driver = {
 	.driver		= {
 		.name	= "qcom_hwspinlock",
 		.of_match_table = qcom_hwspinlock_of_match,
+		.suppress_bind_attrs = true,
 	},
 };
 
