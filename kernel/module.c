@@ -3618,7 +3618,9 @@ core_param(module_blacklist, module_blacklist, charp, 0400);
  * must not be (re)loaded.  Add entries as needed.
  */
 static const char * const custom_module_blacklist[] = {
+#if IS_BUILTIN(CONFIG_ARM_QCOM_CPUFREQ_HW)
 	"qcom_cpufreq_hw",
+#endif
 	NULL,
 };
 
