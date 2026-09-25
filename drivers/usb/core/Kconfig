@@ -108,7 +108,7 @@ config USB_LEDS_TRIGGER_USBPORT
 config USB_AUTOSUSPEND_DELAY
 	int "Default autosuspend delay"
 	depends on USB
-	default 2
+	default 1
 	help
 	  The default autosuspend delay in seconds.  Can be overridden
 	  with the usbcore.autosuspend command line or module parameter.
