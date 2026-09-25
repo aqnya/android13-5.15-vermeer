@@ -14,7 +14,11 @@
 
 static int udplitev6_sk_init(struct sock *sk)
 {
-	udpv6_init_sock(sk);
+	int err;
+
+	err = udpv6_init_sock(sk);
+	if (err)
+		return err;
 	udp_sk(sk)->pcflag = UDPLITE_BIT;
 	return 0;
 }
