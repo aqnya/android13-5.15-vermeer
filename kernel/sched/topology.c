@@ -1528,7 +1528,16 @@ sd_init(struct sched_domain_topology_level *tl,
 
 	*sd = (struct sched_domain){
 		.min_interval		= sd_weight,
-		.max_interval		= 2*sd_weight,
+		/*
+		 * Ramp the balance interval further before settling: on systems
+		 * whose task placement is largely decided at wakeup time, the
+		 * periodic rebalance walks the whole group hierarchy of the
+		 * domain and finds it balanced on nearly every visit, so it is
+		 * mostly paying for the scan.  Newidle and wakeup balancing do
+		 * not consult this interval, so the paths that actually place
+		 * tasks are unaffected.
+		 */
+		.max_interval		= 4*sd_weight,
 		.busy_factor		= 16,
 		.imbalance_pct		= 117,
 
