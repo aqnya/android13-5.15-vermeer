@@ -30,6 +30,7 @@
 struct napi_struct;
 extern unsigned int sysctl_net_busy_read __read_mostly;
 extern unsigned int sysctl_net_busy_poll __read_mostly;
+extern unsigned int sysctl_net_irq_suspend_timeout __read_mostly;
 
 static inline bool net_busy_loop_on(void)
 {
@@ -47,6 +48,9 @@ void napi_busy_loop(unsigned int napi_id,
 		    bool (*loop_end)(void *, unsigned long),
 		    void *loop_end_arg, bool prefer_busy_poll, u16 budget);
 
+void napi_suspend_irqs(unsigned int napi_id);
+void napi_resume_irqs(unsigned int napi_id);
+
 #else /* CONFIG_NET_RX_BUSY_POLL */
 static inline unsigned long net_busy_loop_on(void)
 {
@@ -56,6 +60,14 @@ static inline unsigned long net_busy_loop_on(void)
 static inline bool sk_can_busy_loop(struct sock *sk)
 {
 	return false;
+}
+
+static inline void napi_suspend_irqs(unsigned int napi_id)
+{
+}
+
+static inline void napi_resume_irqs(unsigned int napi_id)
+{
 }
 
 #endif /* CONFIG_NET_RX_BUSY_POLL */
