@@ -565,15 +565,10 @@ struct sched_entity {
 	struct sched_avg		avg;
 #endif
 
-	/*
-	 * EEVDF: virtual deadline, subtree-min deadline, preserved lag and
-	 * request slice.  These reuse the Android KABI reserves at the tail of
-	 * the struct so the layout (and therefore task_struct) is unchanged.
-	 */
-	ANDROID_KABI_USE(1, u64 deadline);
-	ANDROID_KABI_USE(2, u64 min_vruntime);
-	ANDROID_KABI_USE(3, s64 vlag);
-	ANDROID_KABI_USE(4, u64 slice);
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 struct sched_rt_entity {
