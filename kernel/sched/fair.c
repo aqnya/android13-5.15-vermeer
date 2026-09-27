@@ -64,6 +64,15 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
 
 const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
 
+/*
+ * Cadence (in milliseconds) at which the NOHZ idle load balancer refreshes
+ * the blocked load of idle CPUs.  Default 256 == 8 * LOAD_AVG_PERIOD
+ * (32ms); see _nohz_idle_balance().  Exposed to userspace as
+ * /proc/sys/kernel/sched_nohz_stats_ms so it can be raised to cut idle-CPU
+ * wakeups (or lowered to restore the previous cadence) without a reflash.
+ */
+unsigned int sysctl_sched_nohz_stats_ms = 256;
+
 int sched_thermal_decay_shift;
 static int __init setup_sched_thermal_decay_shift(char *str)
 {
@@ -11184,11 +11193,14 @@ static void _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 	 * timer only has to stop the statistics from going stale for good.
 	 * Keeping it at LOAD_AVG_PERIOD means waking an idle CPU out of idle
 	 * up to 30 times a second (IPI plus a walk of every idle CPU's blocked
-	 * load) for no placement benefit; a quarter of that rate is plenty.
+	 * load) for no placement benefit.  The cadence is a runtime knob
+	 * (sched_nohz_stats_ms) defaulting to 8 * LOAD_AVG_PERIOD, so it can
+	 * be tuned longer on devices whose placement is decided at wakeup
+	 * time (and where this is pure bookkeeping) without a reflash.
 	 */
 	if (flags & NOHZ_STATS_KICK)
 		WRITE_ONCE(nohz.next_blocked,
-			   now + msecs_to_jiffies(4 * LOAD_AVG_PERIOD));
+			   now + msecs_to_jiffies(sysctl_sched_nohz_stats_ms));
 
 abort:
 	/* There is still blocked load, enable periodic update */
