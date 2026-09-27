@@ -571,7 +571,7 @@ struct sched_entity {
 	 * the struct so the layout (and therefore task_struct) is unchanged.
 	 */
 	ANDROID_KABI_USE(1, u64 deadline);
-	ANDROID_KABI_USE(2, u64 min_deadline);
+	ANDROID_KABI_USE(2, u64 min_vruntime);
 	ANDROID_KABI_USE(3, s64 vlag);
 	ANDROID_KABI_USE(4, u64 slice);
 };
@@ -1079,8 +1079,8 @@ struct task_struct {
 	struct nameidata		*nameidata;
 
 #ifdef CONFIG_SYSVIPC
-	// struct sysv_sem			sysvsem;
-	// struct sysv_shm			sysvshm;
+	struct sysv_sem			sysvsem;
+	struct sysv_shm			sysvshm;
 #endif
 #ifdef CONFIG_DETECT_HUNG_TASK
 	unsigned long			last_switch_count;
@@ -1530,15 +1530,9 @@ struct task_struct {
 	ANDROID_KABI_RESERVE(3);
 	ANDROID_KABI_RESERVE(4);
 	ANDROID_KABI_RESERVE(5);
-
-#ifdef CONFIG_SYSVIPC
-	ANDROID_KABI_USE(6, struct sysv_sem sysvsem);
-	_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);
-#else
 	ANDROID_KABI_RESERVE(6);
 	ANDROID_KABI_RESERVE(7);
 	ANDROID_KABI_RESERVE(8);
-#endif
 
 	/*
 	 * New fields for task_struct should be added above here, so that
