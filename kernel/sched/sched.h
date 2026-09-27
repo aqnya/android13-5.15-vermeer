@@ -561,8 +561,28 @@ struct cfs_rq {
 	 */
 	struct sched_entity	*curr;
 	struct sched_entity	*next;
+#ifdef __GENKSYMS__
+	/*
+	 * Genksyms view: keep the original members so the exported type CRCs
+	 * (notably `runqueues`, whose type embeds struct cfs_rq) stay stable.
+	 */
 	struct sched_entity	*last;
 	struct sched_entity	*skip;
+#else
+	/*
+	 * EEVDF: the ->last / ->skip buddies are unused. Reuse their storage
+	 * for the weighted-average virtual runtime and load so struct cfs_rq
+	 * (and therefore struct rq / runqueues) does not change size.
+	 */
+	union {
+		struct sched_entity *last;
+		s64 avg_vruntime;
+	};
+	union {
+		struct sched_entity *skip;
+		u64 avg_load;
+	};
+#endif
 
 #ifdef	CONFIG_SCHED_DEBUG
 	unsigned int		nr_spread_over;
@@ -2162,6 +2182,7 @@ extern const u32		sched_prio_to_wmult[40];
 #endif
 
 #define ENQUEUE_WAKEUP_SYNC	0x80
+#define ENQUEUE_INITIAL		0x100
 
 #define RETRY_TASK		((void *)-1UL)
 
@@ -2457,9 +2478,7 @@ extern const_debug unsigned int sysctl_sched_nr_migrate;
 extern const_debug unsigned int sysctl_sched_migration_cost;
 
 #ifdef CONFIG_SCHED_DEBUG
-extern unsigned int sysctl_sched_latency;
-extern unsigned int sysctl_sched_min_granularity;
-extern unsigned int sysctl_sched_wakeup_granularity;
+extern unsigned int sysctl_sched_base_slice;
 extern int sysctl_resched_latency_warn_ms;
 extern int sysctl_resched_latency_warn_once;
 
@@ -2752,6 +2771,9 @@ static inline void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 
 extern struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq);
 extern struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq);
+
+extern u64 avg_vruntime(struct cfs_rq *cfs_rq);
+extern int entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se);
 
 #ifdef	CONFIG_SCHED_DEBUG
 extern bool sched_debug_verbose;
