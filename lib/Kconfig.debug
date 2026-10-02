@@ -1643,9 +1643,14 @@ menu "Debug kernel data structures"
 config DEBUG_LIST
 	bool "Debug linked list manipulation"
 	depends on DEBUG_KERNEL || BUG_ON_DATA_CORRUPTION
+	select LIST_HARDENED
 	help
-	  Enable this to turn on extended checks in the linked-list
-	  walking routines.
+	  Enable this to turn on extended checks in the linked-list walking
+	  routines.
+
+	  This option trades better quality error reports for performance, and
+	  is more suitable for kernel debugging. If you care about performance,
+	  you should only enable CONFIG_LIST_HARDENED instead.
 
 	  If unsure, say N.
 
@@ -1681,7 +1686,7 @@ config DEBUG_NOTIFIERS
 
 config BUG_ON_DATA_CORRUPTION
 	bool "Trigger a BUG when data corruption is detected"
-	select DEBUG_LIST
+	select LIST_HARDENED
 	help
 	  Select this option if the kernel should BUG when it encounters
 	  data corruption in kernel memory structures when they get checked

@@ -2,7 +2,8 @@
  * Copyright 2006, Red Hat, Inc., Dave Jones
  * Released under the General Public License (GPL).
  *
- * This file contains the linked list validation for DEBUG_LIST.
+ * This file contains the linked list validation and error reporting for
+ * LIST_HARDENED and DEBUG_LIST.
  */
 
 #include <linux/export.h>
@@ -65,6 +66,5 @@ bool __list_del_entry_valid(struct list_head *entry)
 		return false;
 
 	return true;
-
 }
 EXPORT_SYMBOL(__list_del_entry_valid);

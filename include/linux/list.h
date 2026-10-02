@@ -36,11 +36,77 @@ static inline void INIT_LIST_HEAD(struct list_head *list)
 	WRITE_ONCE(list->prev, list);
 }
 
-#ifdef CONFIG_DEBUG_LIST
+#ifdef CONFIG_LIST_HARDENED
+
+/*
+ * Perform the full set of list corruption checks and report on failure.
+ *
+ * These are the historical out-of-line functions. Their names, prototypes
+ * and calling convention are part of the module ABI, so they stay exported
+ * and unchanged.
+ */
 extern bool __list_add_valid(struct list_head *new,
-			      struct list_head *prev,
-			      struct list_head *next);
+			     struct list_head *prev,
+			     struct list_head *next);
 extern bool __list_del_entry_valid(struct list_head *entry);
+
+/*
+ * Perform minimal list integrity checking inline to catch non-faulting
+ * corruptions, and only if a corruption is detected call the reporting
+ * functions above.
+ *
+ * With CONFIG_DEBUG_LIST the out-of-line functions are called directly
+ * instead: the inline checks would fault before reporting if prev/next
+ * were NULL.
+ */
+static __always_inline bool __list_add_valid_check(struct list_head *new,
+						   struct list_head *prev,
+						   struct list_head *next)
+{
+	bool ret = true;
+
+	if (!IS_ENABLED(CONFIG_DEBUG_LIST)) {
+		/*
+		 * With the hardening version, elide checking if next and prev
+		 * are NULL, since the immediate dereference of them below would
+		 * result in a fault if NULL.
+		 *
+		 * With the reduced set of checks, we can afford to inline the
+		 * checks, which also gives the compiler a chance to elide some
+		 * of them completely if they can be proven at compile-time. If
+		 * one of the pre-conditions does not hold, the slow-path will
+		 * show a report which pre-condition failed.
+		 */
+		if (likely(next->prev == prev && prev->next == next && new != prev && new != next))
+			return true;
+		ret = false;
+	}
+
+	ret &= __list_add_valid(new, prev, next);
+	return ret;
+}
+
+static __always_inline bool __list_del_entry_valid_check(struct list_head *entry)
+{
+	bool ret = true;
+
+	if (!IS_ENABLED(CONFIG_DEBUG_LIST)) {
+		struct list_head *prev = entry->prev;
+		struct list_head *next = entry->next;
+
+		/*
+		 * With the hardening version, elide checking if next and prev
+		 * are NULL, LIST_POISON1 or LIST_POISON2, since the immediate
+		 * dereference of them below would result in a fault.
+		 */
+		if (likely(prev->next == entry && next->prev == entry))
+			return true;
+		ret = false;
+	}
+
+	ret &= __list_del_entry_valid(entry);
+	return ret;
+}
 #else
 static inline bool __list_add_valid(struct list_head *new,
 				struct list_head *prev,
@@ -49,6 +115,16 @@ static inline bool __list_add_valid(struct list_head *new,
 	return true;
 }
 static inline bool __list_del_entry_valid(struct list_head *entry)
+{
+	return true;
+}
+static inline bool __list_add_valid_check(struct list_head *new,
+				struct list_head *prev,
+				struct list_head *next)
+{
+	return true;
+}
+static inline bool __list_del_entry_valid_check(struct list_head *entry)
 {
 	return true;
 }
@@ -67,7 +143,7 @@ static __always_inline void __list_add(struct list_head *new,
 				       struct list_head *prev,
 				       struct list_head *next)
 {
-	if (!__list_add_valid(new, prev, next))
+	if (!__list_add_valid_check(new, prev, next))
 		return;
 
 	next->prev = new;
@@ -136,7 +212,7 @@ static inline void __list_del_clearprev(struct list_head *entry)
 
 static inline void __list_del_entry(struct list_head *entry)
 {
-	if (!__list_del_entry_valid(entry))
+	if (!__list_del_entry_valid_check(entry))
 		return;
 
 	__list_del(entry->prev, entry->next);

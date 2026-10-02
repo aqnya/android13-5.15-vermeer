@@ -76,7 +76,7 @@ static inline void INIT_LIST_HEAD_RCU(struct list_head *list)
 static inline void __list_add_rcu(struct list_head *new,
 		struct list_head *prev, struct list_head *next)
 {
-	if (!__list_add_valid(new, prev, next))
+	if (!__list_add_valid_check(new, prev, next))
 		return;
 
 	new->next = next;

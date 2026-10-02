@@ -8,7 +8,7 @@
 
 #include <linux/list.h>
 
-#ifdef CONFIG_DEBUG_LIST
+#ifdef CONFIG_LIST_HARDENED
 bool __list_add_valid(struct list_head *new, struct list_head *prev,
 		      struct list_head *next)
 {
