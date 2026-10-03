@@ -17,18 +17,18 @@
  *		};
  *	};
  *
- * crashlog memremap()s the console part of that region, hands it to pstore
- * as a backend and lets the pstore kmsg dumper write the log into it when
- * the kernel panics.  On the next boot pstore reads the records back and
+ * crashlog maps the console part of that region, hands it to pstore as a
+ * backend and lets the pstore kmsg dumper write the log into it when the
+ * kernel panics.  On the next boot pstore reads the records back and
  * creates files under /sys/fs/pstore, so the previous boot's log is
  * available even when the current boot did not crash.
  *
- * The reserved region is still part of the System RAM iomem resource, so it
- * must not be claimed with request_mem_region() (that always fails with
- * -EBUSY, just as it would for ramoops).  memremap(MEMREMAP_WB) is used
- * instead: for RAM it returns the existing linear mapping and otherwise
- * falls back to a fresh ioremap(), which is exactly what the pstore ram
- * backend does.
+ * The region must be mapped write-combining (or noncached), not through the
+ * cached linear mapping: a panic reboots within milliseconds and any dirty
+ * cache line still sitting in the CPU cache is lost.  This is why the pstore
+ * ram backend uses persistent_ram_vmap() with pgprot_writecombine() and why
+ * crashlog replicates that here instead of using memremap(MEMREMAP_WB),
+ * which for System RAM hands back the cached linear address.
  *
  * The region is a sequence of self-describing records, each followed by its
  * payload:
@@ -62,7 +62,6 @@
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/kmsg_dump.h>
 #include <linux/mm.h>
@@ -76,6 +75,7 @@
 #include <linux/string.h>
 #include <linux/time.h>
 #include <linux/uaccess.h>
+#include <linux/vmalloc.h>
 
 #define CRASHLOG_MAGIC		0x474c5243	/* "CRLG" */
 #define CRASHLOG_VERSION	1
@@ -96,7 +96,8 @@ struct crashlog_hdr {
 
 struct crashlog {
 	struct device		*dev;
-	void			*base;
+	void			*vmap;		/* page-aligned base of the mapping */
+	void			*base;		/* vmap + offset_in_page(phys) */
 	phys_addr_t		phys;
 	size_t			size;
 	size_t			console_size;
@@ -114,6 +115,34 @@ struct crashlog {
 };
 
 static struct crashlog cl;
+
+/*
+ * Map the region write-combining, exactly like the pstore ram backend does,
+ * so that stores reach DRAM instead of lingering in a write-back cache that
+ * is never flushed before the reboot.
+ */
+static void *crashlog_vmap(phys_addr_t start, size_t size)
+{
+	phys_addr_t page_start = start & PAGE_MASK;
+	size_t offset = offset_in_page(start);
+	unsigned int page_count = DIV_ROUND_UP(size + offset, PAGE_SIZE);
+	struct page **pages;
+	unsigned int i;
+	void *vaddr;
+
+	pages = kmalloc_array(page_count, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return NULL;
+
+	for (i = 0; i < page_count; i++)
+		pages[i] = pfn_to_page((page_start >> PAGE_SHIFT) + i);
+
+	vaddr = vmap(pages, page_count, VM_MAP | VM_IOREMAP,
+		     pgprot_writecombine(PAGE_KERNEL));
+	kfree(pages);
+
+	return vaddr ? vaddr + offset : NULL;
+}
 
 /* Read and sanity check the record header at @off.  Returns false at the end
  * of the records (invalid magic or a truncated/malformed record).
@@ -153,6 +182,8 @@ static void crashlog_publish_magic(size_t off)
 	/* order the magic store after the header/payload stores */
 	wmb();
 	memcpy(cl.base + off, &magic, sizeof(magic));
+	/* make sure the writes have left the cache/combining buffer */
+	mb();
 }
 
 /* Highest record id currently stored, so new records stay unique. */
@@ -307,12 +338,17 @@ static int crashlog_show(struct seq_file *m, void *v)
 
 		if (len && !(flags & CRASHLOG_F_COMPRESSED)) {
 			size_t show = min_t(size_t, len, 8192);
+			void *tmp = kmalloc(show, GFP_KERNEL);
 
-			seq_puts(m, "--- payload ---\n");
-			seq_write(m, cl.base + off + sizeof(hdr), show);
-			if (show < len)
-				seq_puts(m, "\n...(truncated)\n");
-			seq_putc(m, '\n');
+			if (tmp) {
+				memcpy(tmp, cl.base + off + sizeof(hdr), show);
+				seq_puts(m, "--- payload ---\n");
+				seq_write(m, tmp, show);
+				if (show < len)
+					seq_puts(m, "\n...(truncated)\n");
+				seq_putc(m, '\n');
+				kfree(tmp);
+			}
 		}
 
 		off += sizeof(hdr) + len;
@@ -361,10 +397,21 @@ static int crashlog_probe(struct platform_device *pdev)
 	size_t hsize = sizeof(struct crashlog_hdr);
 	int ret;
 
+	/*
+	 * The same region is described by more than one node (ramoops@...,
+	 * mtdoops_pmsg@...), so the first successful probe owns it and the
+	 * others must not touch the live state.
+	 */
+	if (cl.base) {
+		dev_dbg(&pdev->dev, "already initialised\n");
+		return 0;
+	}
+
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
-		dev_err(&pdev->dev, "no memory resource in device tree\n");
-		return -EINVAL;
+		/* e.g. the reg-less ramoops_mem node */
+		dev_dbg(&pdev->dev, "no memory resource in device tree\n");
+		return -ENODEV;
 	}
 
 	cl.dev = &pdev->dev;
@@ -382,18 +429,13 @@ static int crashlog_probe(struct platform_device *pdev)
 	cl.console_size = console_size;
 	cl.pmsg_size = pmsg_size;
 
-	/*
-	 * Do not use request_mem_region(): the reserved region is still part
-	 * of the System RAM iomem resource, so it is always busy.  For RAM,
-	 * memremap(MEMREMAP_WB) returns the existing linear mapping; for
-	 * everything else it falls back to ioremap().
-	 */
-	cl.base = memremap(cl.phys, cl.size, MEMREMAP_WB);
-	if (!cl.base) {
+	cl.vmap = crashlog_vmap(cl.phys, cl.size);
+	if (!cl.vmap) {
 		dev_err(&pdev->dev, "cannot map %pa (%zu bytes)\n",
 			&cl.phys, cl.size);
 		return -ENOMEM;
 	}
+	cl.base = cl.vmap + offset_in_page(cl.phys);
 
 	/* keep ids unique with records left over from a previous boot */
 	cl.next_id = crashlog_max_id() + 1;
@@ -434,7 +476,8 @@ err_buf:
 	kvfree(cl.pstore.buf);
 	cl.pstore.buf = NULL;
 err_map:
-	memunmap(cl.base);
+	vunmap(cl.vmap);
+	cl.vmap = NULL;
 	cl.base = NULL;
 	return ret;
 }
@@ -448,13 +491,15 @@ static int crashlog_remove(struct platform_device *pdev)
 	kvfree(cl.pstore.buf);
 	cl.pstore.buf = NULL;
 
-	memunmap(cl.base);
+	vunmap(cl.vmap);
+	cl.vmap = NULL;
 	cl.base = NULL;
 
 	return 0;
 }
 
 static const struct of_device_id crashlog_of_match[] = {
+	{ .compatible = "ramoops" },
 	{ .compatible = "mtdoops_pmsg" },
 	{ .compatible = "xiaomi,crashlog" },
 	{ }
