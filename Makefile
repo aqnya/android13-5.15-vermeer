@@ -857,6 +857,22 @@ KBUILD_CFLAGS += $(call cc-option,-Wimplicit-fallthrough=5,)
 KBUILD_CFLAGS += -Wno-main
 endif
 
+ifdef CONFIG_CC_POLLY
+# LLVM Polly: polyhedral loop and data-locality optimizer. It only runs when
+# optimizations are enabled (-O1/-O2/-O3; not recommended with -Os/-Oz), so it
+# is only useful together with CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE[_O3]. Probe
+# the flag before use because a clang built without Polly treats
+# "-mllvm -polly" as a hard error. Override the flag set with e.g.
+# CLANG_POLLY_FLAGS="-mllvm -polly".
+CLANG_POLLY_FLAGS ?= -mllvm -polly -mllvm -polly-process-unprofitable \
+		     -mllvm -polly-vectorizer=stripmine
+ifneq ($(call cc-option,-mllvm -polly),)
+KBUILD_CFLAGS += $(CLANG_POLLY_FLAGS)
+else
+$(warning CONFIG_CC_POLLY is enabled but $(CC) does not support -mllvm -polly; skipping)
+endif
+endif
+
 # These warnings generated too much noise in a regular build.
 # Use make W=1 to enable them (see scripts/Makefile.extrawarn)
 KBUILD_CFLAGS += $(call cc-disable-warning, unused-but-set-variable)

@@ -1398,6 +1398,19 @@ config CC_OPTIMIZE_FOR_SIZE
 
 endchoice
 
+config CC_POLLY
+	bool "Enable LLVM Polly loop optimizations"
+	depends on CC_IS_CLANG
+	help
+	  Build the kernel with LLVM's Polly polyhedral loop and data-locality
+	  optimizer (-mllvm -polly). Polly only runs when optimizations are
+	  enabled (-O1/-O2/-O3); it is not recommended together with
+	  CONFIG_CC_OPTIMIZE_FOR_SIZE (-Os).
+
+	  Polly performs aggressive loop transformations, which can increase
+	  build time and binary size, and may expose latent miscompiles. It is
+	  intended for performance testing; if unsure, say N.
+
 config HAVE_LD_DEAD_CODE_DATA_ELIMINATION
 	bool
 	help
