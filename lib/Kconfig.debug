@@ -1027,7 +1027,7 @@ config PANIC_TIMEOUT
 config CRASHLOG
 	bool "Save the kernel log to reserved RAM and expose it via pstore"
 	depends on PSTORE
-	default y
+	default n
 	help
 	  Map the reserved crash region described by the device tree (the
 	  mtdoops_pmsg node, e.g. reg = <0xa7000000 0x400000> on SM8550) and
