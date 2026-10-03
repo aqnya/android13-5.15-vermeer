@@ -1,323 +1,485 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * crashlog - keep the kernel log in a file so that it survives a panic.
+ * crashlog - keep the kernel log in the device's reserved crash area and
+ * expose it through pstore after the next boot.
  *
  * The kernel log lives in a ring buffer in RAM and is gone the moment the
- * machine reboots, which is exactly when it is wanted most.  This keeps a
- * file open on a writable filesystem (/data/kernel-crash.log by default)
- * and, from a panic notifier, appends the whole log buffer to it and
- * fsync()s the result.
+ * machine reboots, which is exactly when it is wanted most.  On the Xiaomi
+ * SM8550 (vermeer) the bootloader reserves a region for that purpose and the
+ * device tree describes it as
  *
- * The file is opened ahead of time by a delayed work item instead of in the
- * panic path: the panic path then only has to write (no path resolution, no
- * allocation) and, more importantly, the file's inode and directory entry
- * are long since on disk by the time the panic happens.
+ *	&soc {
+ *		mtdoops_pmsg@0xa7000000 {
+ *			compatible = "mtdoops_pmsg";
+ *			reg = <0xa7000000 0x400000>;
+ *			console-size = <0x200000>;
+ *			pmsg-size = <0x200000>;
+ *		};
+ *	};
  *
- * Controls are built-in module parameters, so they also work on the kernel
- * command line:
+ * crashlog memremap()s the console part of that region, hands it to pstore
+ * as a backend and lets the pstore kmsg dumper write the log into it when
+ * the kernel panics.  On the next boot pstore reads the records back and
+ * creates files under /sys/fs/pstore, so the previous boot's log is
+ * available even when the current boot did not crash.
  *
- *	crashlog.path=/data/kernel-crash.log		where to write
- *	echo 1 > /sys/module/crashlog/parameters/dump	dump right now
- *	cat /sys/module/crashlog/parameters/status	state and counters
+ * The reserved region is still part of the System RAM iomem resource, so it
+ * must not be claimed with request_mem_region() (that always fails with
+ * -EBUSY, just as it would for ramoops).  memremap(MEMREMAP_WB) is used
+ * instead: for RAM it returns the existing linear mapping and otherwise
+ * falls back to a fresh ioremap(), which is exactly what the pstore ram
+ * backend does.
  *
- * Caveats - this is a best effort last resort, not a reliable mechanism:
+ * The region is a sequence of self-describing records, each followed by its
+ * payload:
  *
- *  - panic() runs the notifier chain with interrupts disabled and, unless
- *    crash_kexec_post_notifiers is set, only after smp_send_stop() stopped
- *    every other CPU.  Filesystem I/O from there is neither legal (it can
- *    sleep, so expect a spurious "sleeping function called from invalid
- *    context" splat) nor always safe: if the panic interrupted a task
- *    holding a lock in the same filesystem, the write can deadlock instead
- *    of rebooting.  The pre-opened file keeps that window small.
- *  - A kmsg_dump() callback could not be used for this at all: it runs
- *    under rcu_read_lock() and is not allowed to sleep, hence a notifier
- *    plus kmsg_dump_get_line() here.
- *  - Only panics are caught.  A hard hang with no panic, a watchdog-only
- *    reboot or a power cut leaves nothing behind.
- *  - Writing to /data from the kernel is subject to SELinux like any other
- *    write.  If the open or the write fails, the errno shows up in the
- *    status parameter.
+ *	+----------------------------+ offset 0
+ *	| struct crashlog_hdr        |
+ *	+----------------------------+
+ *	| payload (record->size)     |
+ *	+----------------------------+ <-- next record
+ *	| ...                        |
+ *	+----------------------------+
+ *
+ * A record is written by first storing the payload, then the header and
+ * finally the magic.  A reset in the middle of a dump therefore leaves a
+ * partial record with no magic, which is skipped, instead of a torn one.
+ *
+ * The payload may be compressed (pstore enables compression by default), so
+ * the compressed flag is stored and handed back to pstore on read for it to
+ * decompress.
+ *
+ * Only one pstore backend can be active at a time, and the generic ramoops
+ * driver (postcore_initcall) binds the overlapping ramoops@0xa7000000 node
+ * before this driver even gets a chance to probe.  To let crashlog own the
+ * region either build without CONFIG_PSTORE_RAM, or boot with
+ * pstore.backend=crashlog so that ramoops fails its own registration and
+ * releases the region before crashlog probes.
  */
 
 #define pr_fmt(fmt)	"crashlog: " fmt
 
 #include <linux/err.h>
-#include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/io.h>
+#include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/kmsg_dump.h>
-#include <linux/limits.h>
+#include <linux/mm.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
-#include <linux/panic_notifier.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/proc_fs.h>
+#include <linux/pstore.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/workqueue.h>
+#include <linux/time.h>
+#include <linux/uaccess.h>
 
-#define CRASHLOG_PATH_MAX	256
-#define CRASHLOG_LINE_MAX	2048
-#define CRASHLOG_RETRY_INTERVAL	(10 * HZ)
-#define CRASHLOG_RETRY_MAX	90
+#define CRASHLOG_MAGIC		0x474c5243	/* "CRLG" */
+#define CRASHLOG_VERSION	1
 
-static char want_path[CRASHLOG_PATH_MAX] = "/data/kernel-crash.log";
-static char have_path[CRASHLOG_PATH_MAX];
-static struct file *crashlog_file;
-static unsigned int open_tries;
-static unsigned int dump_count;
-static int last_errno;
-static char dump_line[CRASHLOG_LINE_MAX];
-static struct delayed_work open_work;
-static DEFINE_MUTEX(ctrl_lock);
+/* the record payload was compressed by pstore */
+#define CRASHLOG_F_COMPRESSED	BIT(0)
 
-/* 只在进程上下文调用，持 ctrl_lock。panic 路径不碰这两个函数。 */
-static void crashlog_close_locked(void)
+struct crashlog_hdr {
+	__le32	magic;
+	__le32	version;
+	__le32	flags;
+	__le32	len;		/* payload length */
+	__le64	time_s;
+	__le32	time_ns;
+	__le32	reason;
+	__le32	id;
+} __packed;
+
+struct crashlog {
+	struct device		*dev;
+	void			*base;
+	phys_addr_t		phys;
+	size_t			size;
+	size_t			console_size;
+	size_t			pmsg_size;
+
+	struct pstore_info	pstore;
+	void			*buf;
+
+	/* next free offset while a dump is being accumulated */
+	size_t			write_len;
+	/* offset of the next record handed to pstore */
+	size_t			read_off;
+	/* id handed out to the next record written */
+	u32			next_id;
+};
+
+static struct crashlog cl;
+
+/* Read and sanity check the record header at @off.  Returns false at the end
+ * of the records (invalid magic or a truncated/malformed record).
+ */
+static bool crashlog_read_hdr(size_t off, struct crashlog_hdr *hdr)
 {
-	if (crashlog_file) {
-		filp_close(crashlog_file, NULL);
-		crashlog_file = NULL;
-	}
-	have_path[0] = '\0';
+	u32 len;
+
+	if (off + sizeof(*hdr) > cl.console_size)
+		return false;
+
+	memcpy(hdr, cl.base + off, sizeof(*hdr));
+	if (le32_to_cpu(hdr->magic) != CRASHLOG_MAGIC ||
+	    le32_to_cpu(hdr->version) != CRASHLOG_VERSION)
+		return false;
+
+	len = le32_to_cpu(hdr->len);
+	if (len > cl.console_size - off - sizeof(*hdr))
+		return false;
+
+	return true;
 }
 
-/* 0 = 已打开，负 = 打开失败。持 ctrl_lock 调用。 */
-static int crashlog_open_locked(void)
+/* Erase the magic of the record at @off so readers skip it. */
+static void crashlog_zap(size_t off)
 {
-	struct file *f;
+	u32 zero = 0;
 
-	crashlog_close_locked();
+	memcpy(cl.base + off, &zero, sizeof(zero));
+}
 
-	f = filp_open(want_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
-	if (IS_ERR(f)) {
-		last_errno = (int)PTR_ERR(f);
-		return last_errno;
+/* Store the magic last, once the rest of the record is in place. */
+static void crashlog_publish_magic(size_t off)
+{
+	__le32 magic = cpu_to_le32(CRASHLOG_MAGIC);
+
+	/* order the magic store after the header/payload stores */
+	wmb();
+	memcpy(cl.base + off, &magic, sizeof(magic));
+}
+
+/* Highest record id currently stored, so new records stay unique. */
+static u32 crashlog_max_id(void)
+{
+	struct crashlog_hdr hdr;
+	size_t off = 0;
+	u32 max = 0;
+
+	while (crashlog_read_hdr(off, &hdr)) {
+		u32 id = le32_to_cpu(hdr.id);
+
+		if (id > max)
+			max = id;
+		off += sizeof(hdr) + le32_to_cpu(hdr.len);
 	}
 
-	crashlog_file = f;
-	strscpy(have_path, want_path, sizeof(have_path));
-	last_errno = 0;
-	pr_info("kernel log will be saved to %s\n", have_path);
+	return max;
+}
+
+static int crashlog_pstore_open(struct pstore_info *psi)
+{
+	cl.read_off = 0;
+	return 0;
+}
+
+static int crashlog_pstore_close(struct pstore_info *psi)
+{
+	return 0;
+}
+
+static ssize_t crashlog_pstore_read(struct pstore_record *record)
+{
+	struct crashlog_hdr hdr;
+	size_t len;
+
+	if (!crashlog_read_hdr(cl.read_off, &hdr))
+		return 0;
+
+	len = le32_to_cpu(hdr.len);
+	if (!len)
+		return 0;
+
+	record->buf = kmalloc(len + 1, GFP_KERNEL);
+	if (!record->buf)
+		return -ENOMEM;
+
+	memcpy(record->buf, cl.base + cl.read_off + sizeof(hdr), len);
+	record->buf[len] = '\0';
+
+	record->size		= len;
+	record->type		= PSTORE_TYPE_DMESG;
+	record->id		= le32_to_cpu(hdr.id);
+	record->reason		= le32_to_cpu(hdr.reason);
+	record->compressed	= !!(le32_to_cpu(hdr.flags) &
+				       CRASHLOG_F_COMPRESSED);
+	record->time.tv_sec	= le64_to_cpu(hdr.time_s);
+	record->time.tv_nsec	= le32_to_cpu(hdr.time_ns);
+
+	cl.read_off += sizeof(hdr) + len;
+	return len;
+}
+
+static int crashlog_pstore_write(struct pstore_record *record)
+{
+	struct crashlog_hdr hdr;
+	size_t hsize = sizeof(hdr);
+	size_t len = record->size;
+	size_t off;
+
+	/* The first part of a dump replaces whatever was stored before. */
+	if (record->part <= 1)
+		cl.write_len = 0;
+
+	off = cl.write_len;
+
+	/* Not enough room left: start over. */
+	if (hsize + len > cl.console_size - off) {
+		off = 0;
+		cl.write_len = 0;
+		if (len > cl.console_size - hsize)
+			len = cl.console_size - hsize;
+	}
+
+	memcpy(cl.base + off + hsize, record->buf, len);
+
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.version	= cpu_to_le32(CRASHLOG_VERSION);
+	hdr.flags	= cpu_to_le32(record->compressed ?
+				       CRASHLOG_F_COMPRESSED : 0);
+	hdr.len		= cpu_to_le32(len);
+	hdr.time_s	= cpu_to_le64(record->time.tv_sec);
+	hdr.time_ns	= cpu_to_le32(record->time.tv_nsec);
+	hdr.reason	= cpu_to_le32(record->reason);
+	hdr.id		= cpu_to_le32(cl.next_id++);
+	memcpy(cl.base + off, &hdr, hsize);
+
+	/* Publish the magic only once the record is complete. */
+	crashlog_publish_magic(off);
+
+	record->id = le32_to_cpu(hdr.id);
+	cl.write_len = off + hsize + len;
+	return 0;
+}
+
+static int crashlog_pstore_erase(struct pstore_record *record)
+{
+	struct crashlog_hdr hdr;
+	size_t off = 0;
+
+	while (crashlog_read_hdr(off, &hdr)) {
+		if (le32_to_cpu(hdr.id) == record->id) {
+			/* Reading stops at the first missing magic, so only
+			 * the last record can be erased without hiding the
+			 * ones after it.  This is good enough for crash logs.
+			 */
+			crashlog_zap(off);
+			return 0;
+		}
+		off += sizeof(hdr) + le32_to_cpu(hdr.len);
+	}
+
 	return 0;
 }
 
 /*
- * /data only shows up once userspace mounted it, so keep retrying until it
- * does (and again whenever the path is changed).  Once the file is open this
- * stops polling.
+ * /proc/crashlog: dump the records currently in the region and allow a
+ * manual dump so the whole write -> read path can be exercised without
+ * panicking.  Echoing '1' (or 't') triggers the same kmsg_dump() path a
+ * real oops/panic uses.
  */
-static void crashlog_open_work_fn(struct work_struct *work)
+static int crashlog_show(struct seq_file *m, void *v)
 {
+	struct crashlog_hdr hdr;
+	size_t off = 0;
+	unsigned int nr = 0;
+
+	seq_printf(m, "phys=%pa size=%zu console=%zu pmsg=%zu next_id=%u\n",
+		   &cl.phys, cl.size, cl.console_size, cl.pmsg_size,
+		   cl.next_id);
+
+	while (crashlog_read_hdr(off, &hdr)) {
+		u32 len = le32_to_cpu(hdr.len);
+		u32 flags = le32_to_cpu(hdr.flags);
+
+		seq_printf(m,
+			   "record %u: off=%zu ver=%u flags=0x%x len=%u id=%u reason=%u time=%lld.%09u\n",
+			   nr++, off, le32_to_cpu(hdr.version), flags, len,
+			   le32_to_cpu(hdr.id), le32_to_cpu(hdr.reason),
+			   (long long)le64_to_cpu(hdr.time_s),
+			   le32_to_cpu(hdr.time_ns));
+
+		if (len && !(flags & CRASHLOG_F_COMPRESSED)) {
+			size_t show = min_t(size_t, len, 8192);
+
+			seq_puts(m, "--- payload ---\n");
+			seq_write(m, cl.base + off + sizeof(hdr), show);
+			if (show < len)
+				seq_puts(m, "\n...(truncated)\n");
+			seq_putc(m, '\n');
+		}
+
+		off += sizeof(hdr) + len;
+	}
+
+	if (!nr)
+		seq_puts(m, "no valid record\n");
+
+	return 0;
+}
+
+static int crashlog_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, crashlog_show, NULL);
+}
+
+static ssize_t crashlog_proc_write(struct file *file, const char __user *ubuf,
+				   size_t count, loff_t *ppos)
+{
+	char c;
+
+	if (!count || get_user(c, ubuf))
+		return -EFAULT;
+
+	if (c == '1' || c == 't' || c == 'd') {
+		pr_info("triggering a manual kmsg dump\n");
+		kmsg_dump(KMSG_DUMP_OOPS);
+	}
+
+	return count;
+}
+
+static const struct proc_ops crashlog_proc_ops = {
+	.proc_open	= crashlog_proc_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+	.proc_write	= crashlog_proc_write,
+};
+
+static int crashlog_probe(struct platform_device *pdev)
+{
+	struct device_node *np = pdev->dev.of_node;
+	struct resource *res;
+	u32 console_size = 0, pmsg_size = 0;
+	size_t hsize = sizeof(struct crashlog_hdr);
 	int ret;
 
-	mutex_lock(&ctrl_lock);
-
-	if (crashlog_file && !strcmp(have_path, want_path)) {
-		open_tries = 0;
-		mutex_unlock(&ctrl_lock);
-		return;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "no memory resource in device tree\n");
+		return -EINVAL;
 	}
 
-	ret = crashlog_open_locked();
-	if (!ret) {
-		open_tries = 0;
-		mutex_unlock(&ctrl_lock);
-		return;
+	cl.dev = &pdev->dev;
+	cl.phys = res->start;
+	cl.size = resource_size(res);
+
+	of_property_read_u32(np, "console-size", &console_size);
+	of_property_read_u32(np, "pmsg-size", &pmsg_size);
+	if (!console_size || console_size > cl.size)
+		console_size = cl.size;
+	if (console_size <= hsize) {
+		dev_err(&pdev->dev, "region too small (%zu bytes)\n", cl.size);
+		return -EINVAL;
+	}
+	cl.console_size = console_size;
+	cl.pmsg_size = pmsg_size;
+
+	/*
+	 * Do not use request_mem_region(): the reserved region is still part
+	 * of the System RAM iomem resource, so it is always busy.  For RAM,
+	 * memremap(MEMREMAP_WB) returns the existing linear mapping; for
+	 * everything else it falls back to ioremap().
+	 */
+	cl.base = memremap(cl.phys, cl.size, MEMREMAP_WB);
+	if (!cl.base) {
+		dev_err(&pdev->dev, "cannot map %pa (%zu bytes)\n",
+			&cl.phys, cl.size);
+		return -ENOMEM;
 	}
 
-	if (++open_tries > CRASHLOG_RETRY_MAX) {
-		if (open_tries == CRASHLOG_RETRY_MAX + 1)
-			pr_warn("cannot open %s (%d), giving up\n",
-				want_path, last_errno);
-		mutex_unlock(&ctrl_lock);
-		return;
+	/* keep ids unique with records left over from a previous boot */
+	cl.next_id = crashlog_max_id() + 1;
+
+	cl.pstore.bufsize = cl.console_size - hsize;
+	cl.pstore.buf = kvmalloc(cl.pstore.bufsize, GFP_KERNEL);
+	if (!cl.pstore.buf) {
+		ret = -ENOMEM;
+		goto err_map;
 	}
 
-	mutex_unlock(&ctrl_lock);
-	schedule_delayed_work(&open_work, CRASHLOG_RETRY_INTERVAL);
+	cl.pstore.owner		= THIS_MODULE;
+	cl.pstore.name		= "crashlog";
+	cl.pstore.open		= crashlog_pstore_open;
+	cl.pstore.close		= crashlog_pstore_close;
+	cl.pstore.read		= crashlog_pstore_read;
+	cl.pstore.write		= crashlog_pstore_write;
+	cl.pstore.erase		= crashlog_pstore_erase;
+	cl.pstore.flags		= PSTORE_FLAGS_DMESG;
+	cl.pstore.max_reason	= KMSG_DUMP_MAX;
+
+	ret = pstore_register(&cl.pstore);
+	if (ret) {
+		dev_err(&pdev->dev,
+			"pstore_register failed (%d): ramoops active, use pstore.backend=crashlog\n",
+			ret);
+		goto err_buf;
+	}
+
+	proc_create("crashlog", 0600, NULL, &crashlog_proc_ops);
+
+	dev_info(&pdev->dev,
+		 "%zu bytes at %pa (console %zu, pmsg %zu)\n",
+		 cl.size, &cl.phys, cl.console_size, cl.pmsg_size);
+	return 0;
+
+err_buf:
+	kvfree(cl.pstore.buf);
+	cl.pstore.buf = NULL;
+err_map:
+	memunmap(cl.base);
+	cl.base = NULL;
+	return ret;
 }
 
-/* kernel_write() may write less than asked for; keep going until it is all out. */
-static int crashlog_write_all(struct file *f, const char *buf, size_t len,
-			      loff_t *pos)
+static int crashlog_remove(struct platform_device *pdev)
 {
-	while (len) {
-		ssize_t ret = kernel_write(f, buf, len, pos);
+	pstore_unregister(&cl.pstore);
 
-		if (ret < 0)
-			return (int)ret;
-		if (!ret)
-			return -EIO;
-		buf += ret;
-		len -= ret;
-	}
+	remove_proc_entry("crashlog", NULL);
+
+	kvfree(cl.pstore.buf);
+	cl.pstore.buf = NULL;
+
+	memunmap(cl.base);
+	cl.base = NULL;
+
 	return 0;
 }
+
+static const struct of_device_id crashlog_of_match[] = {
+	{ .compatible = "mtdoops_pmsg" },
+	{ .compatible = "xiaomi,crashlog" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, crashlog_of_match);
+
+static struct platform_driver crashlog_driver = {
+	.probe	= crashlog_probe,
+	.remove	= crashlog_remove,
+	.driver	= {
+		.name		= "crashlog",
+		.of_match_table	= crashlog_of_match,
+	},
+};
 
 /*
- * Append one full copy of the kernel log.  dump_line is shared with the
- * manual trigger; a panic landing in the middle of one only garbles a line.
+ * The mtdoops_pmsg node lives on a simple-bus, so its platform device is
+ * created by the arch_initcall_sync DT population (before this driver is
+ * registered) and is bound here as soon as the driver registers.
  */
-static void crashlog_dump(struct file *f, const char *reason)
-{
-	struct kmsg_dump_iter iter;
-	char hdr[160];
-	loff_t pos = 0;
-	size_t len;
-	int ret, n;
-
-	n = scnprintf(hdr, sizeof(hdr), "\n===== crashlog: %s =====\n", reason);
-	ret = crashlog_write_all(f, hdr, n, &pos);
-
-	if (!ret) {
-		kmsg_dump_rewind(&iter);
-		while (kmsg_dump_get_line(&iter, false, dump_line,
-					  sizeof(dump_line), &len)) {
-			if (!len)
-				continue;
-			ret = crashlog_write_all(f, dump_line, len, &pos);
-			if (ret)
-				break;
-		}
-	}
-
-	/* Flush the data *and* the metadata: the reboot that follows a panic
-	 * does not sync anything by itself.
-	 */
-	if (!ret)
-		ret = vfs_fsync(f, 0);
-
-	n = scnprintf(hdr, sizeof(hdr), "===== crashlog: %s (%s) =====\n\n",
-		      reason, ret ? "incomplete" : "complete");
-	crashlog_write_all(f, hdr, n, &pos);
-
-	last_errno = ret;
-	dump_count++;
-}
-
-static int crashlog_panic_notify(struct notifier_block *nb, unsigned long action,
-				 void *data)
-{
-	struct file *f = crashlog_file;
-	bool opened_here = false;
-
-	if (!f) {
-		/* Path changed a moment ago, or /data showed up too late. */
-		f = filp_open(have_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
-		if (IS_ERR(f)) {
-			last_errno = (int)PTR_ERR(f);
-			return NOTIFY_DONE;
-		}
-		opened_here = true;
-	}
-
-	crashlog_dump(f, data ? (const char *)data : "panic");
-
-	if (opened_here)
-		filp_close(f, NULL);
-
-	return NOTIFY_DONE;
-}
-
-static struct notifier_block crashlog_panic_nb = {
-	.notifier_call	= crashlog_panic_notify,
-	.priority	= INT_MAX,
-};
-
-static int crashlog_path_set(const char *val, const struct kernel_param *kp)
-{
-	char tmp[CRASHLOG_PATH_MAX];
-	size_t len;
-
-	if (!val)
-		return -EINVAL;
-
-	/* sysfs may hand us a trailing newline */
-	len = strnlen(val, sizeof(tmp));
-	if (len == sizeof(tmp))
-		return -ENAMETOOLONG;
-	memcpy(tmp, val, len);
-	tmp[len] = '\0';
-	strim(tmp);
-
-	if (tmp[0] != '/')
-		return -EINVAL;
-
-	mutex_lock(&ctrl_lock);
-	strscpy(want_path, tmp, sizeof(want_path));
-	crashlog_close_locked();
-	open_tries = 0;
-	mutex_unlock(&ctrl_lock);
-
-	schedule_delayed_work(&open_work, 0);
-	return 0;
-}
-
-static int crashlog_path_get(char *buffer, const struct kernel_param *kp)
-{
-	return scnprintf(buffer, PAGE_SIZE, "%s\n", want_path);
-}
-
-static int crashlog_dump_set(const char *val, const struct kernel_param *kp)
-{
-	mutex_lock(&ctrl_lock);
-	if (!crashlog_file)
-		crashlog_open_locked();
-	if (crashlog_file)
-		crashlog_dump(crashlog_file, "manual");
-	else if (!last_errno)
-		last_errno = -ENODEV;
-	mutex_unlock(&ctrl_lock);
-
-	return last_errno;
-}
-
-static int crashlog_status_get(char *buffer, const struct kernel_param *kp)
-{
-	const char *state;
-
-	if (!crashlog_file)
-		state = "not open";
-	else if (strcmp(have_path, want_path))
-		state = "stale";
-	else
-		state = "open";
-
-	return scnprintf(buffer, PAGE_SIZE,
-			 "state:    %s\n"
-			 "want:     %s\n"
-			 "open:     %s\n"
-			 "tries:    %u\n"
-			 "dumps:    %u\n"
-			 "last err: %d\n",
-			 state, want_path,
-			 crashlog_file ? have_path : "-",
-			 open_tries, dump_count, last_errno);
-}
-
-static const struct kernel_param_ops crashlog_path_ops = {
-	.set	= crashlog_path_set,
-	.get	= crashlog_path_get,
-};
-
-static const struct kernel_param_ops crashlog_dump_ops = {
-	.set	= crashlog_dump_set,
-};
-
-static const struct kernel_param_ops crashlog_status_ops = {
-	.get	= crashlog_status_get,
-};
-
-module_param_cb(path, &crashlog_path_ops, NULL, 0644);
-module_param_cb(dump, &crashlog_dump_ops, NULL, 0200);
-module_param_cb(status, &crashlog_status_ops, NULL, 0444);
-
 static int __init crashlog_init(void)
 {
-	INIT_DELAYED_WORK(&open_work, crashlog_open_work_fn);
-	schedule_delayed_work(&open_work, 0);
-
-	atomic_notifier_chain_register(&panic_notifier_list, &crashlog_panic_nb);
-	return 0;
+	return platform_driver_register(&crashlog_driver);
 }
-device_initcall(crashlog_init);
+subsys_initcall(crashlog_init);
 
-MODULE_DESCRIPTION("Save the kernel log to a file when the kernel panics");
+MODULE_DESCRIPTION("Save the kernel log to the reserved crash region and expose it via pstore");
 MODULE_LICENSE("GPL");

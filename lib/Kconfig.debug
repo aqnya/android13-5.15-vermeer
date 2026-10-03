@@ -1025,21 +1025,24 @@ config PANIC_TIMEOUT
 	  value n < 0 will reboot immediately.
 
 config CRASHLOG
-	bool "Save the kernel log to a file when the kernel panics"
-	default n
+	bool "Save the kernel log to reserved RAM and expose it via pstore"
+	depends on PSTORE
+	default y
 	help
-	  Keep a file open on a writable filesystem (by default
-	  /data/kernel-crash.log) and append the whole kernel log to it,
-	  followed by an fsync(), whenever the kernel panics. Without this
-	  the log disappears with the reboot that follows a panic.
+	  Map the reserved crash region described by the device tree (the
+	  mtdoops_pmsg node, e.g. reg = <0xa7000000 0x400000> on SM8550) and
+	  register it as a pstore backend. The pstore kmsg dumper then stores
+	  the kernel log there when the kernel panics, and on the next boot
+	  pstore reads the record back into /sys/fs/pstore, so the previous
+	  boot's log is visible even if the current boot did not crash.
 
-	  The path can be set on the kernel command line with
-	  crashlog.path=, or at runtime through /sys/module/crashlog/parameters/,
-	  which also has "dump" (write to take a dump right now) and "status".
+	  The region lives in RAM that the bootloader keeps powered across a
+	  warm reboot, so no filesystem I/O is performed from the panic path.
 
-	  The panic path runs with interrupts disabled and every other CPU
-	  stopped, so this is best effort: the write can still deadlock if the
-	  panic interrupted a task holding a lock in the same filesystem.
+	  Only one pstore backend may be active. The device tree also
+	  describes a ramoops node for the same region and the ramoops driver
+	  binds it first, so to let crashlog own the region either disable
+	  CONFIG_PSTORE_RAM or boot with pstore.backend=crashlog.
 
 	  Say N if unsure.
 
