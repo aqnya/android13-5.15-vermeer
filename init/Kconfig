@@ -1385,10 +1385,13 @@ config CC_OPTIMIZE_FOR_PERFORMANCE
 
 config CC_OPTIMIZE_FOR_PERFORMANCE_O3
 	bool "Optimize more for performance (-O3)"
-	depends on ARC
+	depends on ARC || ARM64
 	help
 	  Choosing this option will pass "-O3" to your compiler to optimize
 	  the kernel yet more for performance.
+
+	  Aggressive inlining and loop optimizations can increase build time
+	  and binary size, and may expose latent miscompiles. If unsure, say N.
 
 config CC_OPTIMIZE_FOR_SIZE
 	bool "Optimize for size (-Os)"
